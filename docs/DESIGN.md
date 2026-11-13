@@ -1,4 +1,4 @@
-# dsh-comfyui-bridge 设计说明
+﻿# dsh-comfyui-link 设计说明
 
 这份文档讲实现：**为什么是这么写的**，以及改代码前必须知道的边界。上手怎么用看 [README](../README.md)。
 
@@ -250,13 +250,13 @@ const saved = await attachments.saveImage({ bytes, mediaType, name })
 
 ## 性能数字
 
-在一台 8 GiB 显存的消费级显卡上实测（仅作参考，不是承诺 —— 你的机器可能快也可能慢）：
+在一台消费级显卡上实测（仅作参考，不是承诺 —— 你的机器可能快也可能慢）：
 
 | 操作 | 耗时 |
 | --- | --- |
 | `comfy_status` / `comfy_models` / `comfy_node` | 数十毫秒 |
 | 512×512 / 4 步出图 | 约 3 秒 |
 | 1024×1024 / 30 步出图 | 几十秒到两分钟 |
-| `npm test`（40 条纯单测） | 约 1 秒 |
+| `npm test`（64 条纯单测） | 约 1 秒 |
 
 所以 `comfy_result` 的 `wait_seconds` 要按尺寸给：512 给 30 就够，1024 给 120，多张按张数加。显存吃紧时 batch 保持 1，要腾地方用 `comfy_control free_vram`。

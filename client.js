@@ -11,7 +11,7 @@
  * ============================================================================
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-comfyui-bridge',
+  id: 'dsh-comfyui-link',
   factory: (require) => {
     const React = require('react')
     const h = React.createElement
@@ -331,10 +331,10 @@ window.__ModuleLoader__.load({
 
     function installStyle() {
       if (typeof document === 'undefined') return () => {}
-      const tagId = 'dsh-comfyui-bridge/settings'
+      const tagId = 'dsh-comfyui-link/settings'
       if (document.querySelector(`style[data-plugin-css=${JSON.stringify(tagId)}]`) !== null) return () => {}
       const style = document.createElement('style')
-      style.dataset.plugin = 'dsh-comfyui-bridge'
+      style.dataset.plugin = 'dsh-comfyui-link'
       style.dataset.pluginCss = tagId
       style.textContent = CSS
       document.head.appendChild(style)

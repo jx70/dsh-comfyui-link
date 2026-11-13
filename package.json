@@ -1,5 +1,5 @@
 {
-  "name": "dsh-comfyui-bridge",
+  "name": "dsh-comfyui-link",
   "version": "1.0.0",
   "description": "DSH 的 ComfyUI 桥：8 个工具直连本机 ComfyUI，支持文生图 / 图生图 / LoRA / 算法放大 / 自带工作流，并可指定审图模型看后把关、不满自动重画",
   "keywords": [
@@ -16,14 +16,14 @@
     "workflow"
   ],
   "license": "MIT",
-  "author": "dsh-comfyui-bridge contributors",
+  "author": "dsh-comfyui-link contributors",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/jx70/dsh-comfyui-bridge.git"
+    "url": "git+https://github.com/jx70/dsh-comfyui-link.git"
   },
-  "homepage": "https://github.com/jx70/dsh-comfyui-bridge#readme",
+  "homepage": "https://github.com/jx70/dsh-comfyui-link#readme",
   "bugs": {
-    "url": "https://github.com/jx70/dsh-comfyui-bridge/issues"
+    "url": "https://github.com/jx70/dsh-comfyui-link/issues"
   },
   "type": "module",
   "main": "index.js",
@@ -46,7 +46,8 @@
     "README.en.md",
     "LICENSE",
     "CHANGELOG.md",
-    "docs"
+    "docs",
+    "!docs/demo.png"
   ],
   "icon": "./icon.svg",
   "scripts": {

@@ -108,7 +108,7 @@ test('DEFAULTS 是运行期的兜底值，和 Config 的默认值一致', () => 
 /* ── 开源元数据 ────────────────────────────────────────────────────────── */
 
 test('package.json 的开源元数据齐全', () => {
-  assert.equal(pkg.name, 'dsh-comfyui-bridge')
+  assert.equal(pkg.name, 'dsh-comfyui-link')
   assert.equal(pkg.license, 'MIT')
   assert.equal(pkg.private, undefined, '要发布就不能是 private')
   assert.equal(typeof pkg.description, 'string')
@@ -117,7 +117,7 @@ test('package.json 的开源元数据齐全', () => {
   assert.match(pkg.repository.url, /^git\+https:\/\/github\.com\/.+\/.+\.git$/)
   assert.match(pkg.homepage, /^https:\/\/github\.com\/.+\/.+#readme$/)
   assert.match(pkg.bugs.url, /^https:\/\/github\.com\/.+\/.+\/issues$/)
-  assert.equal(pkg.author, 'dsh-comfyui-bridge contributors')
+  assert.equal(pkg.author, 'dsh-comfyui-link contributors')
 })
 
 test('engines 与 publishConfig 说明清楚给谁装、往哪发', () => {
@@ -148,7 +148,9 @@ test('exports 里每条路径都指向真实文件（通配符按示例展开）
 
 test('files 里每一项都真的存在（npm pack 不会漏东西）', () => {
   for (const entry of pkg.files) {
-    assert.doesNotThrow(() => statSync(join(ROOT, entry)), `files 里的 ${entry} 不存在`)
+    // 以 ! 开头的是排除规则（例如 !docs/demo.png），要校验的是它指的那个文件
+    const target = entry.startsWith('!') ? entry.slice(1) : entry
+    assert.doesNotThrow(() => statSync(join(ROOT, target)), `files 里的 ${entry} 不存在`)
   }
   // 关键运行文件必须在发布清单里
   for (const required of ['index.js', 'client.js', 'lib', 'cordis.patch.yml', 'locale', 'icon.svg']) {
@@ -222,16 +224,16 @@ test('脚本一律从 scripts/env.mjs 取环境，不自己写死地址', () => 
 
 test('cordis.patch.yml 用的是发布名，且只放静态默认值', () => {
   const yaml = read('cordis.patch.yml')
-  assert.match(yaml, /name: dsh-comfyui-bridge/)
+  assert.match(yaml, /name: dsh-comfyui-link/)
   assert.match(yaml, /baseUrl: 'http:\/\/127\.0\.0\.1:8188'/)
   assert.doesNotMatch(yaml, /@local/)
 })
 
 test('client.js 的模块 id 与 style 标记跟着包名走', () => {
   const text = read('client.js')
-  assert.match(text, /id: 'dsh-comfyui-bridge'/)
-  assert.match(text, /const tagId = 'dsh-comfyui-bridge\/settings'/)
-  assert.match(text, /style\.dataset\.plugin = 'dsh-comfyui-bridge'/)
+  assert.match(text, /id: 'dsh-comfyui-link'/)
+  assert.match(text, /const tagId = 'dsh-comfyui-link\/settings'/)
+  assert.match(text, /style\.dataset\.plugin = 'dsh-comfyui-link'/)
   assert.doesNotMatch(text, /@local/)
 })
 
@@ -252,6 +254,36 @@ test('README 与 locale 里没有本机硬件实况（显卡/显存/具体模型
 test('LICENSE 是 MIT，且写的是 contributors 而不是某个人', () => {
   const text = read('LICENSE')
   assert.match(text, /MIT License/)
-  assert.match(text, /Copyright \(c\) \d{4} dsh-comfyui-bridge contributors/)
+  assert.match(text, /Copyright \(c\) \d{4} dsh-comfyui-link contributors/)
   assert.match(text, /THE SOFTWARE IS PROVIDED "AS IS"/)
+})
+
+/* ── 包名守护 ──────────────────────────────────────────────────────────── */
+
+test('旧的包名不许复活（它和 npm 上别人的包重名）', () => {
+  // 运行时拼接，免得这个测试文件自己命中自己。
+  const retired = ['dsh', 'comfyui', 'bridge'].join('-')
+  const offenders = []
+  for (const file of sourceFiles()) {
+    if (file.startsWith('test/')) continue
+    // CHANGELOG 要记改名历史，允许它提旧名；其余文件一律不许。
+    if (file === 'CHANGELOG.md') continue
+    if (read(file).includes(retired)) offenders.push(file)
+  }
+  assert.deepEqual(offenders, [], `这些文件里还有旧包名：${offenders.join(', ')}`)
+})
+
+test('README 不许给出会装到别人包的 npm 安装命令', () => {
+  // 本包没发 npm。写成 `add dsh-comfyui-link` 会让读者从 registry 拉一个空名/别人的包。
+  const pkgName = pkg.name
+  const forbidden = new RegExp(`add\\s+${pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b(?!-)`)
+  for (const file of ['README.md', 'README.en.md', 'cordis.patch.yml', 'docs/DEVELOPMENT.md']) {
+    let text
+    try {
+      text = read(file)
+    } catch {
+      continue
+    }
+    assert.doesNotMatch(text, forbidden, `${file} 里出现了直接按包名安装的命令`)
+  }
 })

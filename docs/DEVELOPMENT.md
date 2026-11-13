@@ -1,4 +1,4 @@
-# 开发说明
+﻿# 开发说明
 
 改这个插件之前先看一遍这份，能省掉大部分「改了没反应」「测试红了但不知道为啥」的时间。实现层的设计取舍看 [DESIGN.md](./DESIGN.md)，怎么用看 [README](../README.md)。
 
@@ -39,8 +39,8 @@ npm install
 ├── test/
 │   ├── helpers/fake-ctx.mjs  假 ctx（tools / systemPrompt / connection / llm / attachments）
 │   ├── graph.test.mjs        工作流构造与 HTTP 客户端（22 条）
-│   ├── registration.test.mjs 注册形状与开关拦截（18 条）
-│   └── config.test.mjs       配置 schema + 去本地化守护
+│   ├── registration.test.mjs 注册形状与开关拦截（20 条）
+│   └── config.test.mjs       配置 schema + 去本地化守护 + 包名守护
 ├── scripts/
 │   ├── env.mjs               所有脚本的环境入口（唯一允许读环境变量的地方）
 │   ├── offline.mjs           假 ctx 冒烟
@@ -61,7 +61,7 @@ npm install
 ## 跑测试
 
 ```bash
-npm test          # 40 条纯单测，约 1 秒
+npm test          # 64 条纯单测，约 1 秒
 npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检查
 ```
 
@@ -83,6 +83,7 @@ node --test test/config.test.mjs
 - `package.json` 的开源元数据必须齐全（license / repository / homepage / bugs / author / keywords）
 - `files` / `exports` / `scripts` 里提到的每个路径都必须真实存在
 - README 里不许留显卡型号、显存实况、作者机器上的模型文件名
+- 旧包名不许复活；README 里不许写「add 后面直接跟包名」那种会装到别处的命令
 
 **加新文件时如果踩到这些规则，说明该改代码而不是改测试。** 例外是 `test/` 自己（它当然要提到这些模式）。
 
