@@ -1,0 +1,18 @@
+# 仓库内统一 LF。
+#
+# 本仓库的源码全是 LF，但 Windows 上 git 默认 core.autocrlf=true 会在
+# checkout 时把文本文件改成 CRLF —— 那会让探针脚本里比对字符串的断言
+# 在不同机器上表现不一致，也会让 node:test 的快照出现假失败。
+* text=auto eol=lf
+
+# PowerShell 脚本：LF，由文件内容自带 BOM，git 不动它
+*.ps1 text eol=lf
+
+# 二进制资源：不做任何行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.zip binary
+*.gz binary

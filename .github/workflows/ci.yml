@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (node ${{ matrix.node }} / ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # 只跑真正会有人用的组合：Linux 跑主流程，Windows 确认路径与 junction 相关逻辑没写歪。
+        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 纯单测（不需要 ComfyUI）
+        run: npm test
+
+      - name: 假 ctx 冒烟（注册 / schema / render）
+        run: npm run smoke
+
+      - name: 假 ctx 路由探针
+        run: npm run probe:route
+
+      - name: 打包内容自检
+        run: npm pack --dry-run

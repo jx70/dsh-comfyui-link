@@ -1,0 +1,257 @@
+/**
+ * config.test.mjs —— 配置 schema + 「能不能直接开源」的守护测试
+ * ============================================================================
+ * 前半段钉住 Config（设置页表单就是照它渲染的）：
+ *   · 五个 volatile 段都在，默认值对
+ *   · review.maxAttempts 的 1–5 边界
+ * 后半段钉住「去本地化」这件事本身：
+ *   · 包里任何文件都不许再出现 @local/ 这种本机路径式包名
+ *   · 任何文件都不许出现作者机器的绝对路径 / 凭据文件硬编码
+ *   · package.json 的开源元数据齐全，files 里列的每一项都真的存在
+ *   · scripts 指向的脚本都真的存在
+ * ============================================================================
+ */
+import assert from 'node:assert/strict'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { join, relative } from 'node:path'
+import test from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url))
+const read = (relPath) => readFileSync(join(ROOT, relPath), 'utf8')
+const pkg = JSON.parse(read('package.json'))
+const plugin = await import('../index.js')
+
+const { Config, DEFAULTS } = plugin
+
+/**
+ * volatile 字段在 apply() 里是 cosmokit 引用对象（`{ get }`），不是普通值。
+ * 这里就是 index.js 里 unwrapVolatile 的那一步，测试里也要走一遍。
+ */
+const unwrap = (value) => (value && typeof value.get === 'function' ? value.get() : value)
+
+/** 仓库里要发出去的那些源文件（跳过 node_modules / .git / 临时产物） */
+function sourceFiles(dir = ROOT, out = []) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (['node_modules', '.git', '.comfy-probe', 'coverage', 'dist'].includes(entry.name)) continue
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      sourceFiles(full, out)
+    } else if (/\.(m?js|json|yml|yaml|md|svg|txt)$/.test(entry.name)) {
+      out.push(relative(ROOT, full).replaceAll('\\', '/'))
+    }
+  }
+  return out
+}
+
+/* ── Config schema ─────────────────────────────────────────────────────── */
+
+test('Config 给全套默认值：指向本机 8188，四个开关全关', () => {
+  const value = Config({})
+  assert.equal(value.baseUrl, 'http://127.0.0.1:8188')
+  assert.deepEqual(unwrap(value.review), {
+    enabled: false,
+    provider: '',
+    model: '',
+    maxAttempts: 1,
+    extra: '',
+  })
+  assert.deepEqual(unwrap(value.img2img), { enabled: false })
+  assert.deepEqual(unwrap(value.lora), { enabled: false })
+  assert.deepEqual(unwrap(value.upscale), { enabled: false })
+})
+
+test('四个功能段都是 volatile（设置页改完即时生效）', () => {
+  const value = Config({})
+  for (const key of ['review', 'img2img', 'lora', 'upscale']) {
+    assert.equal(typeof value[key]?.get, 'function', `${key} 不是 volatile 引用对象`)
+  }
+  // baseUrl 是静态配置，改了要重载插件，所以它不是 volatile
+  assert.equal(typeof value.baseUrl, 'string')
+})
+
+test('Config 接受自定义 baseUrl 与四个开关', () => {
+  const value = Config({
+    baseUrl: 'http://192.168.1.9:8188',
+    review: { enabled: true, provider: 'p', model: 'm', maxAttempts: 3, extra: '角色必须还原' },
+    img2img: { enabled: true },
+    lora: { enabled: true },
+    upscale: { enabled: true },
+  })
+  assert.equal(value.baseUrl, 'http://192.168.1.9:8188')
+  const review = unwrap(value.review)
+  assert.equal(review.maxAttempts, 3)
+  assert.equal(review.extra, '角色必须还原')
+  assert.equal(unwrap(value.img2img).enabled, true)
+  assert.equal(unwrap(value.lora).enabled, true)
+  assert.equal(unwrap(value.upscale).enabled, true)
+})
+
+test('Config 拒绝越界的 review.maxAttempts（1–5）', () => {
+  assert.throws(() => Config({ review: { maxAttempts: 0 } }), /maxAttempts/)
+  assert.throws(() => Config({ review: { maxAttempts: 9 } }), /maxAttempts/)
+  assert.throws(() => Config({ review: { maxAttempts: 2.5 } }), /maxAttempts/)
+  assert.equal(unwrap(Config({ review: { maxAttempts: 5 } }).review).maxAttempts, 5)
+  assert.equal(unwrap(Config({ review: { maxAttempts: 1 } }).review).maxAttempts, 1)
+})
+
+test('DEFAULTS 是运行期的兜底值，和 Config 的默认值一致', () => {
+  assert.deepEqual(DEFAULTS, {
+    baseUrl: 'http://127.0.0.1:8188',
+    timeoutMs: 20000,
+    pollMs: 2500,
+    maxWaitSeconds: 900,
+    outputRoot: '',
+  })
+})
+
+/* ── 开源元数据 ────────────────────────────────────────────────────────── */
+
+test('package.json 的开源元数据齐全', () => {
+  assert.equal(pkg.name, 'dsh-comfyui-bridge')
+  assert.equal(pkg.license, 'MIT')
+  assert.equal(pkg.private, undefined, '要发布就不能是 private')
+  assert.equal(typeof pkg.description, 'string')
+  assert.ok(pkg.description.length > 0)
+  assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.length >= 5)
+  assert.match(pkg.repository.url, /^git\+https:\/\/github\.com\/.+\/.+\.git$/)
+  assert.match(pkg.homepage, /^https:\/\/github\.com\/.+\/.+#readme$/)
+  assert.match(pkg.bugs.url, /^https:\/\/github\.com\/.+\/.+\/issues$/)
+  assert.equal(pkg.author, 'dsh-comfyui-bridge contributors')
+})
+
+test('engines 与 publishConfig 说明清楚给谁装、往哪发', () => {
+  assert.equal(pkg.engines.node, '>=22')
+  assert.match(pkg.engines.dsh, /^>=\d+\.\d+\.\d+/)
+  assert.deepEqual(pkg.publishConfig, { access: 'public', registry: 'https://registry.npmjs.org/' })
+  assert.equal(pkg.type, 'module')
+  assert.equal(pkg.main, 'index.js')
+  assert.equal(pkg.icon, './icon.svg')
+})
+
+test('dsh 字段声明了 bundle patch 与 web 客户端注入', () => {
+  assert.deepEqual(pkg.dsh.bundle, { patch: './cordis.patch.yml' })
+  assert.equal(pkg.dsh.client.platform, 'web')
+  assert.deepEqual(pkg.dsh.client.inject, [
+    '@deepseek-ai/dsh-client-locale',
+    '@deepseek-ai/dsh-client-ui-settings',
+  ])
+})
+
+test('exports 里每条路径都指向真实文件（通配符按示例展开）', () => {
+  const samples = { './locale/*.json': './locale/zh.json' }
+  for (const [key, target] of Object.entries(pkg.exports)) {
+    const path = samples[target] ?? target
+    assert.doesNotThrow(() => statSync(join(ROOT, path)), `exports["${key}"] → ${target} 不存在`)
+  }
+})
+
+test('files 里每一项都真的存在（npm pack 不会漏东西）', () => {
+  for (const entry of pkg.files) {
+    assert.doesNotThrow(() => statSync(join(ROOT, entry)), `files 里的 ${entry} 不存在`)
+  }
+  // 关键运行文件必须在发布清单里
+  for (const required of ['index.js', 'client.js', 'lib', 'cordis.patch.yml', 'locale', 'icon.svg']) {
+    assert.ok(pkg.files.includes(required), `files 少了 ${required}`)
+  }
+})
+
+test('scripts 指向的脚本文件都存在', () => {
+  for (const [name, command] of Object.entries(pkg.scripts)) {
+    const match = /node\s+(\S+\.mjs)/.exec(command)
+    if (!match) continue
+    assert.doesNotThrow(() => statSync(join(ROOT, match[1])), `scripts.${name} 指向的 ${match[1]} 不存在`)
+  }
+})
+
+test('运行期只依赖 schemastery（lib 与 client 都不引宿主内部包）', () => {
+  assert.deepEqual(Object.keys(pkg.dependencies), ['@deepseek-ai/schemastery'])
+  assert.equal(pkg.devDependencies, undefined, '不该有 devDependencies：测试只用 node:test')
+})
+
+/* ── 去本地化守护 ──────────────────────────────────────────────────────── */
+
+test('包里任何文件都不许再出现 @local/ 这种本机包名', () => {
+  const localScope = '@local' + '/'
+  const offenders = []
+  for (const file of sourceFiles()) {
+    if (file.startsWith('test/')) continue // 这个测试自己会提到它
+    if (read(file).includes(localScope)) offenders.push(file)
+  }
+  assert.deepEqual(offenders, [], `这些文件还带着本机包名：${offenders.join(', ')}`)
+})
+
+test('包里任何文件都不许硬编码作者机器的绝对路径', () => {
+  const patterns = [
+    /[A-Za-z]:[\\/]Users[\\/]/i, // 作者机器的用户目录
+    /npm-cache[\\/]_npx/i, // npx 缓存里的哈希路径
+    /[A-Za-z]:[\\/](?:Agent|DSH|Comfy)[\\/]/i, // 作者机器的项目 / ComfyUI 安装目录
+  ]
+  const offenders = []
+  for (const file of sourceFiles()) {
+    if (file.startsWith('test/')) continue
+    const text = read(file)
+    for (const pattern of patterns) {
+      if (pattern.test(text)) offenders.push(`${file} ← ${pattern}`)
+    }
+  }
+  assert.deepEqual(offenders, [], `还有本机绝对路径：${offenders.join('; ')}`)
+})
+
+test('凭据文件只在 env.mjs 里被读，脚本与源码都不许自己开它', () => {
+  // 注释里提一句路径（告诉使用者该配什么）是应该的，所以先把注释剥掉再看代码。
+  const stripComments = (text) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\//g, '') // 块注释
+      .replace(/^\s*\/\/.*$/gm, '') // 整行行注释
+  const offenders = []
+  for (const file of sourceFiles()) {
+    if (file.startsWith('test/') || file === 'scripts/env.mjs') continue
+    if (!/\.(m?js|json|ya?ml)$/.test(file)) continue
+    if (/\.credentials\.yaml/.test(stripComments(read(file)))) offenders.push(file)
+  }
+  assert.deepEqual(offenders, [], `这些文件自己读了凭据文件：${offenders.join(', ')}`)
+})
+
+test('脚本一律从 scripts/env.mjs 取环境，不自己写死地址', () => {
+  for (const file of ['scripts/selftest.mjs', 'scripts/e2e.mjs', 'scripts/probe-features.mjs', 'scripts/probe-http.mjs', 'scripts/probe-client-bundle.mjs', 'scripts/probe-route.mjs', 'scripts/offline.mjs']) {
+    const text = read(file)
+    assert.match(text, /from '\.\/env\.mjs'/, `${file} 没从 env.mjs 取环境`)
+  }
+})
+
+test('cordis.patch.yml 用的是发布名，且只放静态默认值', () => {
+  const yaml = read('cordis.patch.yml')
+  assert.match(yaml, /name: dsh-comfyui-bridge/)
+  assert.match(yaml, /baseUrl: 'http:\/\/127\.0\.0\.1:8188'/)
+  assert.doesNotMatch(yaml, /@local/)
+})
+
+test('client.js 的模块 id 与 style 标记跟着包名走', () => {
+  const text = read('client.js')
+  assert.match(text, /id: 'dsh-comfyui-bridge'/)
+  assert.match(text, /const tagId = 'dsh-comfyui-bridge\/settings'/)
+  assert.match(text, /style\.dataset\.plugin = 'dsh-comfyui-bridge'/)
+  assert.doesNotMatch(text, /@local/)
+})
+
+test('README 与 locale 里没有本机硬件实况（显卡/显存/具体模型文件名）', () => {
+  for (const file of ['README.md', 'README.en.md']) {
+    let text
+    try {
+      text = read(file)
+    } catch {
+      continue // 英文 README 可以后补
+    }
+    assert.doesNotMatch(text, /RTX\s*\d{4}/i, `${file} 里还有显卡型号`)
+    assert.doesNotMatch(text, /\d+\s*GiB\s*显存/, `${file} 里还有显存实况`)
+    assert.doesNotMatch(text, /anima-base-v1\.0/, `${file} 里还有作者机器上的模型文件名`)
+  }
+})
+
+test('LICENSE 是 MIT，且写的是 contributors 而不是某个人', () => {
+  const text = read('LICENSE')
+  assert.match(text, /MIT License/)
+  assert.match(text, /Copyright \(c\) \d{4} dsh-comfyui-bridge contributors/)
+  assert.match(text, /THE SOFTWARE IS PROVIDED "AS IS"/)
+})

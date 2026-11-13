@@ -1,0 +1,35 @@
+# 依赖
+node_modules/
+pnpm-lock.yaml
+.npm/
+
+# 构建 / 日志
+*.log
+npm-debug.log*
+pnpm-debug.log*
+dist/
+coverage/
+*.tsbuildinfo
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/extensions.json
+
+# 本地实验产物
+.comfy-probe/
+comfy_out/
+tmp/
+tmp-*.json
+*.tmp
+*.bak
+*.orig
+
+# 本地覆盖：ComfyUI 地址、DSH 地址、cookie 之类
+.env
+.env.local
+.env.*.local

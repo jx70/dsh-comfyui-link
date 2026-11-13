@@ -1,0 +1,18 @@
+# ============================================================================
+# dsh-comfyui-bridge — bundle patch（插件自己带的挂载声明）
+# ============================================================================
+# 装好之后 profile 只要在 `dsh.profile.bundles` 里列出本包名即生效，
+# 不用手改 profile 自己的 cordis.patch.yml。
+#
+#   dsh plugin --profile web add dsh-comfyui-bridge
+#   （本地开发：dsh plugin --profile web add link:<插件目录>）
+#
+# 这里只放静态默认值（服务地址等）。审图 / img2img / LoRA / 放大 四个开关
+# 在插件设置页里改，改完热生效、不用重启。
+# ============================================================================
+
+- insert:
+    - id: comfyui
+      name: dsh-comfyui-bridge
+      config:
+        baseUrl: 'http://127.0.0.1:8188'

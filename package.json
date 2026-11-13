@@ -1,0 +1,87 @@
+{
+  "name": "dsh-comfyui-bridge",
+  "version": "1.0.0",
+  "description": "DSH 的 ComfyUI 桥：8 个工具直连本机 ComfyUI，支持文生图 / 图生图 / LoRA / 算法放大 / 自带工作流，并可指定审图模型看后把关、不满自动重画",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "comfyui",
+    "stable-diffusion",
+    "image-generation",
+    "txt2img",
+    "img2img",
+    "lora",
+    "upscale",
+    "workflow"
+  ],
+  "license": "MIT",
+  "author": "dsh-comfyui-bridge contributors",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jx70/dsh-comfyui-bridge.git"
+  },
+  "homepage": "https://github.com/jx70/dsh-comfyui-bridge#readme",
+  "bugs": {
+    "url": "https://github.com/jx70/dsh-comfyui-bridge/issues"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./icon": "./icon.svg",
+    "./locale/*.json": "./locale/*.json",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml",
+    "locale",
+    "icon.svg",
+    "README.md",
+    "README.en.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "docs"
+  ],
+  "icon": "./icon.svg",
+  "scripts": {
+    "test": "node --test test/graph.test.mjs test/registration.test.mjs test/config.test.mjs",
+    "smoke": "node scripts/offline.mjs",
+    "smoke:live": "node scripts/offline.mjs --live",
+    "e2e": "node scripts/e2e.mjs",
+    "selftest": "node scripts/selftest.mjs",
+    "probe:route": "node scripts/probe-route.mjs",
+    "probe:http": "node scripts/probe-http.mjs",
+    "probe:features": "node scripts/probe-features.mjs",
+    "probe:bundle": "node scripts/probe-client-bundle.mjs",
+    "sync": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/sync-github.ps1"
+  },
+  "engines": {
+    "dsh": ">=0.2.0-rc.1",
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}
