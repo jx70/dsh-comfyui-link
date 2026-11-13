@@ -137,7 +137,9 @@ test('没有 connection 服务时安静跳过路由，不影响工具注册', ()
 })
 
 test('默认配置下三个功能开关全关，调用会被拦并提示去设置页开', async () => {
-  const { tools } = boot()
+  // baseUrl 指到必然没人听的端口：这些校验必须发生在联网之前，
+  // 否则开着 ComfyUI 的机器上测试会假通过，CI 上才炸。
+  const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
   const exec = createExec()
 
   await assert.rejects(
@@ -201,11 +203,44 @@ test('comfy_run 拒绝不认识的 mode', async () => {
 })
 
 test('template / img2img 模式缺 prompt 会被拦', async () => {
-  const { tools } = boot({ img2img: { enabled: true } })
+  // 同上：参数校验不能排在联网之后，所以这里也把 baseUrl 指向死端口。
+  const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, img2img: { enabled: true } })
   const run = tools.get('comfy_run')
   await assert.rejects(() => run.execute({ mode: 'template' }, createExec()), /必须给 prompt/)
   await assert.rejects(() => run.execute({ mode: 'template', prompt: '   ' }, createExec()), /必须给 prompt/)
   await assert.rejects(() => run.execute({ mode: 'img2img', prompt: 'x' }, createExec()), /image_prompt_id/)
+})
+
+test('参数校验排在联网之前：ComfyUI 没跑也不影响报错内容', async () => {
+  // 这条守的是「别把纯参数校验放到 await 网络请求后面」。
+  // 本机开着 ComfyUI 时，顺序写反了也照样能过，只有 CI 那种干净环境才暴露。
+  const dead = { baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 }
+  const cases = [
+    { config: dead, tool: 'comfy_run', args: { mode: 'img2img', prompt: 'x', image_prompt_id: 'p1' }, want: /没开启/ },
+    { config: dead, tool: 'comfy_run', args: { mode: 'template', prompt: 'x', lora: 'a.safetensors' }, want: /没开启/ },
+    { config: dead, tool: 'comfy_upscale', args: { image_prompt_id: 'p1', width: 1024, height: 1024 }, want: /没开启/ },
+    { config: { ...dead, img2img: { enabled: true } }, tool: 'comfy_run', args: { mode: 'img2img', prompt: 'x' }, want: /image_prompt_id/ },
+    { config: dead, tool: 'comfy_run', args: { mode: 'template' }, want: /必须给 prompt/ },
+  ]
+  for (const { config, tool, args, want } of cases) {
+    const { tools } = boot(config)
+    await assert.rejects(() => tools.get(tool).execute(args, createExec()), want, `工具 ${tool} 的参数校验被网络错误盖住了`)
+  }
+})
+
+test('ComfyUI 没跑时，参数全对的调用才会走到网络那一步', async () => {
+  const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
+  await assert.rejects(
+    () => tools.get('comfy_run').execute({ mode: 'template', prompt: '一只猫' }, createExec()),
+    (error) => {
+      const message = String(error?.message ?? error)
+      // 具体文案随平台变（ECONNREFUSED / fetch failed），关键是它已经是网络错，
+      // 而不是参数校验或开关拦截。
+      assert.match(message, /ComfyUI/)
+      assert.doesNotMatch(message, /没开启|必须给 prompt|image_prompt_id/)
+      return true
+    },
+  )
 })
 
 test('comfy_upscale 的 method 只给五个算法，默认 lanczos 走 lib', () => {

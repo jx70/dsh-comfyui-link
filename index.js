@@ -684,12 +684,12 @@ export function apply(ctx, config) {
           }
         }
       } else if (mode === 'template' || mode === 'img2img') {
+        // 先把不需要联网的校验全部走完，再去问 ComfyUI 要模型清单。
+        // 否则服务没跑的时候，参数错和开关没开都会被 ECONNREFUSED 盖住，
+        // 用户看到的是「连不上」，而不是真正该改的那个参数。
         if (!args.prompt || args.prompt.trim().length === 0) {
           throw new Error(`mode="${mode}" 时必须给 prompt（正面提示词）`)
         }
-        const index = await client.modelIndex({ signal })
-        const models = resolveModels(index, { unet: args.unet, clip: args.clip, vae: args.vae })
-
         if (mode === 'img2img') {
           if (!features.img2img) {
             throw new Error('图生图（img2img）没开启，请在插件设置页把「img2img」开关打开。')
@@ -697,6 +697,14 @@ export function apply(ctx, config) {
           if (!args.image_prompt_id) {
             throw new Error('mode="img2img" 必须给 image_prompt_id（底图来源，之前出图的 prompt_id）')
           }
+        } else if (args.lora && !features.lora) {
+          throw new Error('LoRA 没开启，请在插件设置页把「lora」开关打开。')
+        }
+
+        const index = await client.modelIndex({ signal })
+        const models = resolveModels(index, { unet: args.unet, clip: args.clip, vae: args.vae })
+
+        if (mode === 'img2img') {
           const { bytes } = await fetchImageRef(args.image_prompt_id, signal)
           const imageName = await uploadImage(bytes, `dsh_src_${args.image_prompt_id.slice(0, 8)}.png`)
           graph = buildImg2Img({
@@ -715,10 +723,6 @@ export function apply(ctx, config) {
             filenamePrefix: 'dsh/img2img',
           })
         } else {
-          const lora = args.lora
-          if (lora && !features.lora) {
-            throw new Error('LoRA 没开启，请在插件设置页把「lora」开关打开。')
-          }
           graph = buildTxt2Img({
             unet: models.unet,
             clip: models.clip,
@@ -734,7 +738,7 @@ export function apply(ctx, config) {
             sampler: args.sampler ?? 'euler',
             scheduler: args.scheduler ?? 'simple',
             filenamePrefix: 'dsh/comfy',
-            lora: lora || undefined,
+            lora: args.lora || undefined,
             loraStrength: args.lora_strength ?? 0.8,
           })
         }
