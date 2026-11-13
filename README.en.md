@@ -1,10 +1,36 @@
-# dsh-comfyui-bridge
+# dsh-comfyui-link
 
-Drive your own ComfyUI from [DeepSeek Harness](https://github.com/deepseek-ai) (DSH): write prompts, tweak parameters, build workflows, submit jobs, and pull the resulting images back for the model to look at. It can also designate a **review model** that inspects each render and automatically re-draws it when the result doesn't meet the requirement.
+[![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
+[![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--rc.1-blueviolet.svg)](https://github.com/deepseek-ai/deepseek-harness)
+
+Drive your own ComfyUI from [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH): write prompts, tweak parameters, build workflows, submit jobs, and pull the resulting images back for the model to look at. It can also designate a **review model** that inspects each render and automatically re-draws it when the result doesn't meet the requirement.
 
 > 中文说明见 [README.md](./README.md)
 
-## What you get
+**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [Configuration](#configuration) · [How it works](#how-it-works) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
+
+## The problem
+
+A model can write a prompt, but it can't see the picture. So a human ends up doing three things every time: paste the prompt into ComfyUI, wait for the render, drag the image back for the model to look at. If it's wrong, start over.
+
+This plugin turns that loop into tools: the model submits the job itself, waits for the result itself, looks at the image itself — and when it isn't satisfied, it re-renders from the review model's feedback. No human in the middle.
+
+![A sample render produced with template mode](./docs/demo.png)
+
+*The image above was produced by this plugin in `mode="template"` on ComfyUI (832×832 / 30 steps).*
+
+## Features
+
+- **Eight tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
+- **Review loop**: after a render, the designated vision model judges it; if unsatisfied, the plugin re-renders from its suggested prompt until the result passes or the attempt limit is hit. Pass a reference image to compare character fidelity.
+- **Live settings**: address, review model, and the img2img / LoRA / upscale switches all live on a settings page that applies changes immediately — no DSH restart.
+- **No host internals**: `lib/comfy.mjs` uses nothing but Node's built-in `fetch` and imports no `@deepseek-ai/*`, so it runs standalone (`npm run selftest` does exactly that).
+- **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
+- **Verifiable**: 62 unit tests plus 7 probe scripts, none of which need you to click anything.
+
+## Tools
 
 Eight tools become available to the model:
 
@@ -16,7 +42,7 @@ Eight tools become available to the model:
 | `comfy_run` | Submit a job — `mode="template"` txt2img (optionally with a LoRA), `mode="img2img"`, or `mode="graph"` with your own API-format workflow |
 | `comfy_result` | Wait for the job, fetch the output images, actually show them to the model, report on-disk paths, optionally `save_to` |
 | `comfy_control` | Cancel a job / interrupt the running one / clear the queue / free VRAM |
-| `comfy_review` | **Review-and-redraw**: let the designated model judge the image, and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity against a reference |
+| `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity |
 | `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image |
 
 ## Requirements
@@ -27,25 +53,30 @@ Eight tools become available to the model:
 
 ## Install
 
-From npm:
+From GitHub:
 
 ```bash
-dsh plugin --profile web add dsh-comfyui-bridge
+dsh plugin --profile web add github:jx70/dsh-comfyui-link
 ```
 
-From a local checkout (for development):
+For local development (when you want edits to take effect immediately), install from a clone:
 
 ```bash
-dsh plugin --profile web add link:/absolute/path/to/dsh-comfyui-bridge
+git clone https://github.com/jx70/dsh-comfyui-link.git
+dsh plugin --profile web add link:/path/to/dsh-comfyui-link
 ```
 
 Restart DSH, open **Settings → ComfyUI Bridge**, and hit **Refresh** — if the model list appears, the connection works.
 
+Installing also writes the package name into your profile's `dsh.profile.bundles` automatically. **You never edit any yml by hand.**
+
 Uninstall:
 
 ```bash
-dsh plugin --profile web remove dsh-comfyui-bridge
+dsh plugin --profile web remove dsh-comfyui-link
 ```
+
+> Not published to npm yet. Don't use the bare-package-name form of `add` — the registry has no such package and nothing gets installed.
 
 ## Usage
 
@@ -63,23 +94,25 @@ Turn on the review switch in settings and pick a vision-capable model from the d
 
 The model runs `comfy_run`, then `comfy_review` (with the `prompt_id` and the original requirement). The review model looks at the image, and if unsatisfied the plugin re-renders from its suggested prompt until satisfied or `maxAttempts` is reached. The result includes every round's verdict / score / feedback / new prompt.
 
+To make the judgement sharper than a vague "character fidelity", pass the `prompt_id` of an earlier render as `reference_prompt_id`: both images go to the review model, which compares hair style / hair colour / eye colour / outfit / palette / overall vibe item by item.
+
 **img2img**
 
 > Redraw that image (prompt_id xxx) with a seaside background, denoise 0.5
 
-Uses `comfy_run` with `mode="img2img"`; `image_prompt_id` points at the base image and `denoise` controls how far it drifts from the original.
+Uses `comfy_run` with `mode="img2img"`; `image_prompt_id` points at the base image and `denoise` controls how far it drifts from the original. Turn on the img2img switch in settings first.
 
 **LoRA**
 
 > Draw a portrait with the my_style LoRA, strength 0.8
 
-Uses `comfy_run` in template mode with `lora` / `lora_strength`. Use `comfy_models` to see what's installed.
+Uses `comfy_run` in template mode with `lora` / `lora_strength`. Use `comfy_models` to see what's installed. The LoRA switch must be on.
 
 **Upscale**
 
 > Upscale the image from prompt_id xxx to 2048×2048
 
-Calls `comfy_upscale`.
+Calls `comfy_upscale`. The upscale switch must be on.
 
 **Your own workflow**
 
@@ -87,7 +120,7 @@ In the ComfyUI UI, export the workflow in **API format** — a JSON blob shaped 
 
 > Run this workflow, change the prompt to "seaside lighthouse" and the seed to 777
 
-The model uses `comfy_run` in graph mode; the prompt is written into the `CLIPTextEncode` node (or the one named by `prompt_node`).
+The model uses `comfy_run` in graph mode; the prompt is written into the `CLIPTextEncode` node (or the one named by `prompt_node`). Graph mode ignores the three feature switches — it doesn't depend on the built-in template.
 
 ## Settings page
 
@@ -106,6 +139,8 @@ Settings → ComfyUI Bridge. Changes apply immediately, no restart.
 
 `provider` / `model` are **a single dropdown**, not free text: when the settings page opens, the browser fetches a list of vision-capable models from the host (`GET /api/comfyui/vision-models`, grouped by provider). Leaving it empty means "follow the current session model". The **Refresh** button re-fetches after you install a provider or switch accounts. The dropdown is independent of the review switch — you can inspect the available models before enabling anything.
 
+The three feature switches are **off on purpose**: each of them adds nodes and time on the ComfyUI side. Defaults off guarantees "install and get one image", everything else is opt-in.
+
 ## Configuration
 
 Static values such as the server address ship in the bundled `cordis.patch.yml`:
@@ -113,7 +148,7 @@ Static values such as the server address ship in the bundled `cordis.patch.yml`:
 ```yaml
 - insert:
     - id: comfyui
-      name: dsh-comfyui-bridge
+      name: dsh-comfyui-link
       config:
         baseUrl: 'http://127.0.0.1:8188'   # your ComfyUI address
 ```
@@ -146,6 +181,44 @@ Other options (overridable in the same place):
 
 Redraws **keep the base image's dimensions** (rounded to a multiple of 16) — a 768-wide image won't silently become 1024.
 
+## How it works
+
+Three layers with clear boundaries:
+
+- `lib/comfy.mjs` — pure HTTP client + workflow construction (`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` …), **imports nothing from `@deepseek-ai/*`**, runs standalone
+- `index.js` — the host plugin: registers 8 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and the read-only `GET /api/comfyui/vision-models` route the settings page uses
+- `client.js` — the browser half: registers the "ComfyUI Bridge" page into the `settings.section` slot and reads/writes volatile fields through `configForms`
+
+`index.js` also does `import z from '@deepseek-ai/schemastery'` to declare `export const Config`, which is why `dependencies` contains that one package and nothing else at runtime.
+
+Why three layers: a bug in workflow construction shouldn't require booting the whole host to locate. `npm run selftest` hits ComfyUI directly and verifies `lib/` in seconds. The full design rationale is in [docs/DESIGN.md](./docs/DESIGN.md).
+
+## Compatibility and known limits
+
+- **Verified against ComfyUI 0.30.2.** Older versions most likely work, but newer endpoints such as `POST /api/jobs/{id}/cancel` may not exist there — `comfy_control`'s `cancel` would return 404 while `interrupt` still works.
+- **Web profile only**: `dsh.client.platform` is `web`, so the settings page needs a browser. Tools still work in pure CLI use; you just can't flip the switches there (put them in `cordis.patch.yml` instead).
+- **The built-in template only uses the three-piece loaders**: `UNETLoader + CLIPLoader + VAELoader`. If your models are all-in-one `checkpoints`, pass your own `CheckpointLoaderSimple` workflow via `mode="graph"`.
+- **Upscale is algorithmic**: `ImageScale` with lanczos / bicubic etc., not an upscale model (ESRGAN and friends). For AI upscaling, build your own workflow and use graph mode.
+- **The review model must accept images**: the settings dropdown only lists models whose `inputModalities` include `image`. A text-only model will be rejected downstream.
+- **Rendering is synchronous waiting**: `comfy_result` polls for up to `maxWaitSeconds`. A timeout doesn't lose the job — call it again.
+
+## FAQ
+
+**Installed, but the tools don't show up?**
+Restart DSH. ESM modules and the profile's bundle list are read at startup, so a `link:` install does nothing until then. If `dsh plugin --profile web list` shows the package but the model has no tools, it's almost always a missing restart.
+
+**The Refresh button does nothing, or the model list is empty?**
+That means `GET /api/comfyui/vision-models` isn't reaching the host. First confirm the address shown on the settings page connects (that's the ComfyUI address, not DSH's); then confirm the current session's provider has a vision-capable model. If the list is empty but the plugin is otherwise fine, leave the review `provider` / `model` empty — it falls back to the current session model.
+
+**`comfy_status` says it can't connect?**
+The plugin looks at `http://127.0.0.1:8188` by default. If ComfyUI runs on another host or port, override `baseUrl` in your profile's `cordis.patch.yml` (see [Configuration](#configuration)).
+
+**`comfy_models` says a folder is empty?**
+The built-in template needs all three of `diffusion_models` / `text_encoders` / `vae`. Add whichever is missing, or switch to `mode="graph"` with your own workflow.
+
+**I changed the code but behaviour didn't change?**
+ESM caches modules — after editing `lib/*.mjs` or `index.js`, disable and re-enable the plugin, or restart DSH. After editing `client.js` you also need a backend restart, because the client bundle is built and cached.
+
 ## Development
 
 ```bash
@@ -166,20 +239,22 @@ The probes that talk to a live DSH (`probe:http` / `probe:bundle`) read their en
 | --- | --- | --- |
 | `COMFY_URL` | `http://127.0.0.1:8188` | ComfyUI address |
 | `DSH_BASE` | `http://127.0.0.1:3080` | Running DSH web address |
-| `DSH_CREDENTIALS` | `<home>/.dsh/.credentials.yaml` | DSH credentials file |
+| `DSH_CREDENTIALS` | the credentials file under `<home>/.dsh/` | DSH credentials file path |
 | `DSH_AUTH_COOKIE` | empty | Supply a ready-made cookie; skips reading the credentials file |
 | `DSH_HOST_MODULES` | auto-resolved | `@deepseek-ai/*` host package directory (used by `smoke` for real schema validation) |
 | `COMFY_LORA` | empty | LoRA filename for `probe:features`; that section is skipped when unset |
 
-See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) and [docs/DESIGN.md](./docs/DESIGN.md) for more.
+See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for more.
 
-### Three layers
+### Contributing
 
-- `lib/comfy.mjs` — pure HTTP client + workflow construction (`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` …), **imports nothing from `@deepseek-ai/*`**, runs standalone
-- `index.js` — the host plugin: registers 8 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and the read-only `GET /api/comfyui/vision-models` route the settings page uses
-- `client.js` — the browser half: registers the "ComfyUI Bridge" page into the `settings.section` slot and reads/writes volatile fields through `configForms`
+Run `npm test` and `npm run smoke` before opening a PR — CI runs those two plus `probe:route` and `npm pack --dry-run` on ubuntu / windows × node 22 / 24. The suite includes a set of "de-localisation" assertions (no absolute paths from the author's machine, no hardware specifics, no install commands that would pull somebody else's package); follow their error messages.
+
+The traps that cost real time while editing code are listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 
 ## Gotchas
+
+These cost real debugging time; writing them down saves you one round:
 
 - **Node ids in links must be strings**: `["2", 0]` works, `[2, 0]` makes ComfyUI raise `KeyError` at `execution.py:933`.
 - **Never `export default apply`**: `cordis-plugin-loader`'s `unwrapExports` would grab the bare function, dropping `inject` and the other named exports, and startup fails with `cannot get property "tools" without inject`.
@@ -191,4 +266,4 @@ See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) and [docs/DESIGN.md](./docs/DES
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) · see [CHANGELOG.md](./CHANGELOG.md)

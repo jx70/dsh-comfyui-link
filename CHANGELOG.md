@@ -3,6 +3,22 @@
 All notable changes to this project are documented here.
 格式按 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号按 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 变更
+
+- **包名改为 `dsh-comfyui-link`**（原 `dsh-comfyui-bridge`）。原名在 npm 上已被他人占用（同名的 1.1.0 版本属于另一个维护者，本身也是 DSH 的 ComfyUI 桥），`add` 后面直接跟包名会装到别人的包。新名在 npm 与 GitHub 上都未占用。界面显示名不变，仍是「ComfyUI 桥 / ComfyUI Bridge」。
+- `package.json` 的 `files` 增加 `!docs/demo.png`：示例图只给 GitHub 看，不进 npm 包（`npm pack` 仍是 14 files）。
+
+### 文档
+
+- `README.md` / `README.en.md` 整体重写：补齐徽章、目录、示例图、特性、兼容性与已知限制、常见问题、贡献指引；安装段按「从 GitHub 装」写，并明确本包暂未发布到 npm。
+- `docs/DESIGN.md` 的性能段去掉具体显存数字，`docs/DEVELOPMENT.md` 同步测试条数与新增的包名守护说明。
+
+### 测试
+
+- `test/config.test.mjs` 新增两条守护：旧包名不许复活；README 与文档里不许出现「`add` 后面直接跟包名」这种会装到别处的命令。`files` 的负向条目（`!` 开头）现在会校验它指向的文件真实存在。（62 → 64 条）
+
 ## [1.0.0] - 2026-11-13
 
 首个公开版本。
