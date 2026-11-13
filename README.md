@@ -1,4 +1,4 @@
-# dsh-comfyui-link
+﻿# dsh-comfyui-link
 
 [![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -28,7 +28,7 @@
 - **设置页热生效**：地址、审图模型、img2img / LoRA / 放大三个开关都在设置页里改，改完立刻生效，不用重启 DSH。
 - **零宿主内部依赖**：`lib/comfy.mjs` 只用 Node 自带的 `fetch`，不 import 任何 `@deepseek-ai/*`，可以脱离 DSH 单独跑（`npm run selftest` 就是干这个）。
 - **graph 模式接管任意工作流**：在 ComfyUI 里导出 API 格式的 JSON，直接交给模型跑，提示词和种子都能改。
-- **可验证**：62 条纯单测 + 7 个探针脚本，全都不需要你手点。
+- **可验证**：64 条纯单测 + 7 个探针脚本，全都不需要你手点。
 
 ## 工具
 

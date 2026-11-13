@@ -1,4 +1,4 @@
-# dsh-comfyui-link
+﻿# dsh-comfyui-link
 
 [![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -28,7 +28,7 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 - **Live settings**: address, review model, and the img2img / LoRA / upscale switches all live on a settings page that applies changes immediately — no DSH restart.
 - **No host internals**: `lib/comfy.mjs` uses nothing but Node's built-in `fetch` and imports no `@deepseek-ai/*`, so it runs standalone (`npm run selftest` does exactly that).
 - **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
-- **Verifiable**: 62 unit tests plus 7 probe scripts, none of which need you to click anything.
+- **Verifiable**: 64 unit tests plus 7 probe scripts, none of which need you to click anything.
 
 ## Tools
 
