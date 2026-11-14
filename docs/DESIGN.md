@@ -411,6 +411,6 @@ extractPromptSection(text) → composeLoraPrompt(prompt, section)
 | `comfy_status` / `comfy_models` / `comfy_node` | 数十毫秒 |
 | 512×512 / 4 步出图 | 约 3 秒 |
 | 1024×1024 / 30 步出图 | 几十秒到两分钟 |
-| `npm test`（119 条纯单测） | 约 1 秒 |
+| `npm test`（121 条纯单测） | 约 1 秒 |
 
 所以 `comfy_result` 的 `wait_seconds` 要按尺寸给：512 给 30 就够，1024 给 120，多张按张数加。显存吃紧时 batch 保持 1，要腾地方用 `comfy_control free_vram`。

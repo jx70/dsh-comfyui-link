@@ -32,7 +32,9 @@ window.__ModuleLoader__.load({
     const LOCALES = {
       zh: {
         nav: 'ComfyUI 桥',
+        pageHint: '这些设置只影响本机的 ComfyUI 桥；改完点「保存」才写入。',
         features: '功能开关',
+        featuresNote: '关掉之后对应的工具调用会被直接拒绝',
         review: '审图',
         reviewNote: '生图后自动把关，不满意就重画',
         reviewEnabled: '开启审图',
@@ -48,12 +50,14 @@ window.__ModuleLoader__.load({
         upscale: '算法放大（upscale）',
         upscaleHint: 'comfy_upscale 放大一张已生成的图',
         output: '图片输出',
+        outputNote: '出图后额外复制一份到这个目录',
         outputDir: '输出目录',
         outputDirHint: '点「选择」挑一个目录；留空 = 图只留在 ComfyUI 自己的 output 里。',
         outputEmpty: '没选（图留在 ComfyUI 的 output）',
         outputClear: '清除',
         outputUnsupported: '这个平台没有系统文件夹选择框，输出目录在这里设不了；要改就写进 profile 的 cordis.patch.yml（output.dir）。',
         loraDocs: 'LoRA 提示词',
+        loraDocsNote: '挂 LoRA 出图时按内容挑一篇文档，把提示词并进 prompt',
         loraDocsDir: '提示词目录',
         loraDocsHint: '目录里可以混放各种文档（角色说明、画风笔记、tag 清单都行），文件名也不必与 LoRA 名对齐 —— 挂 LoRA 出图时会读进来按内容挑最像的那篇，把提示词段并进 prompt。留空 = 不读任何文档。',
         loraDocsEmpty: '没选（不读提示词文档）',
@@ -89,7 +93,9 @@ window.__ModuleLoader__.load({
       },
       en: {
         nav: 'ComfyUI Bridge',
+        pageHint: 'These settings only affect the local ComfyUI bridge; nothing is written until you press Save.',
         features: 'Feature switches',
+        featuresNote: 'Turning one off makes the matching tool call refuse outright',
         review: 'Review',
         reviewNote: 'Auto-check after generation and regenerate on dissatisfaction',
         reviewEnabled: 'Enable review',
@@ -105,12 +111,14 @@ window.__ModuleLoader__.load({
         upscale: 'Algorithmic upscale',
         upscaleHint: 'comfy_upscale enlarges an already-generated image',
         output: 'Image output',
+        outputNote: 'After generating, copy an extra image into this folder',
         outputDir: 'Output directory',
         outputDirHint: 'Press Pick to choose a folder; empty = images stay in ComfyUI own output.',
         outputEmpty: 'Not chosen (images stay in ComfyUI own output)',
         outputClear: 'Clear',
         outputUnsupported: 'This platform has no native folder picker, so the output directory cannot be set here; edit output.dir in the profile cordis.patch.yml instead.',
         loraDocs: 'LoRA prompts',
+        loraDocsNote: 'When a LoRA is used, one document is picked by content and its prompt merged in',
         loraDocsDir: 'Prompt directory',
         loraDocsHint: 'The folder may mix anything (character notes, style notes, tag lists) and file names need not match the LoRA — when a LoRA is used the closest document is picked by content and its prompt section merged into the prompt. Empty = read nothing.',
         loraDocsEmpty: 'Not chosen (no prompt documents are read)',
@@ -147,78 +155,111 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-[data-comfy-settings]{display:flex;flex-direction:column;gap:16px;padding:2px 2px 8px;max-width:640px;}
-[data-comfy-sec]{display:flex;flex-direction:column;gap:10px;padding-bottom:14px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));}
-[data-comfy-sec]:last-child{border-bottom:0;padding-bottom:0;}
+[data-comfy-settings]{display:flex;flex-direction:column;gap:12px;padding:2px 2px 8px;max-width:720px;}
+[data-comfy-page-title]{display:flex;flex-direction:column;gap:2px;padding:0 2px 4px;}
+[data-comfy-title]{font-size:16px;font-weight:500;line-height:24px;color:var(--dsw-alias-label-primary,inherit);}
+[data-comfy-sec]{display:flex;flex-direction:column;gap:12px;padding:12px 14px;
+  border:.5px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l3,rgba(128,128,128,.28)));
+  background:var(--dsw-alias-settings-card-fill,transparent);border-radius:var(--dsw-radius-xl,16px);}
+[data-comfy-fields]{display:flex;flex-direction:column;gap:12px;}
+[data-comfy-switches]{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;}
+[data-comfy-switches] [data-comfy-row]{padding:10px 12px;align-items:center;
+  border:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));
+  border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,transparent);}
+[data-comfy-switches] [data-comfy-label]{font-weight:400;}
 [data-comfy-sec-head]{display:flex;flex-direction:column;gap:2px;}
-[data-comfy-h]{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,inherit);}
-[data-comfy-sub]{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-comfy-h]{font-size:14px;font-weight:500;line-height:22px;color:var(--dsw-alias-label-primary,inherit);}
+[data-comfy-sub]{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-comfy-row]{display:flex;align-items:flex-start;gap:10px;}
 [data-comfy-grow]{flex:1;min-width:0;}
-[data-comfy-label]{font-size:13px;color:var(--dsw-alias-label-primary,inherit);}
-[data-comfy-note]{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);margin-top:2px;}
+[data-comfy-label]{font-size:12px;font-weight:500;line-height:18px;color:var(--dsw-alias-label-secondary,#81858c);}
+[data-comfy-note]{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);margin-top:2px;}
 [data-comfy-sw]{flex:none;width:38px;height:22px;border-radius:11px;border:0;cursor:pointer;position:relative;
   background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.35));transition:background .15s;padding:0;margin-top:2px;}
-[data-comfy-sw][data-on]{background:#3b82f6;}
-[data-comfy-sw] i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;
-  transition:left .15s;display:block;}
+[data-comfy-sw][data-on]{background:var(--dsw-alias-brand-primary);}
+[data-comfy-sw] i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;
+  background:var(--dsw-alias-switch-thumb);transition:left .15s;display:block;}
 [data-comfy-sw][data-on] i{left:19px;}
-[data-comfy-sw][disabled]{opacity:.45;cursor:default;}
-[data-comfy-input]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
-  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
-[data-comfy-input]:focus{outline:none;border-color:#3b82f6;}
+[data-comfy-sw][disabled]{opacity:.4;cursor:default;}
+[data-comfy-input]{width:100%;box-sizing:border-box;padding:0 10px;height:32px;border-radius:var(--dsw-radius-md,12px);
+  font-size:13px;
+  border:.5px solid var(--dsw-alias-border-l4,var(--dsw-alias-border-l3,rgba(128,128,128,.28)));
+  background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
+[data-comfy-input]:focus{outline:none;border-color:var(--dsw-alias-state-business-primary);}
+[data-comfy-input][disabled]{opacity:.6;cursor:default;}
 [data-comfy-num]{width:88px;}
-[data-comfy-path]{box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;line-height:18px;
+[data-comfy-path]{box-sizing:border-box;padding:7px 10px;border-radius:var(--dsw-radius-md,12px);font-size:13px;line-height:18px;
   min-height:32px;word-break:break-all;
-  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
-  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
+  border:.5px solid var(--dsw-alias-border-l4,var(--dsw-alias-border-l3,rgba(128,128,128,.28)));
+  background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
 [data-comfy-path][data-empty]{color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-comfy-actions]{display:flex;flex:none;align-items:center;gap:6px;}
-[data-comfy-clear]{flex:none;padding:7px 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
-  background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);transition:opacity .15s,color .15s;}
-[data-comfy-clear]:hover{color:var(--dsw-alias-label-primary,inherit);border-color:#ef4444;}
-[data-comfy-clear]:focus-visible{outline:2px solid #3b82f6;outline-offset:1px;}
-[data-comfy-clear][disabled]{opacity:.45;cursor:default;}
-[data-comfy-pick]{flex:none;padding:7px 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
-  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);transition:opacity .15s;}
-[data-comfy-pick]:hover{border-color:#3b82f6;}
-[data-comfy-pick]:focus-visible{outline:2px solid #3b82f6;outline-offset:1px;}
-[data-comfy-pick][disabled]{opacity:.45;cursor:default;}
-[data-comfy-select]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;cursor:pointer;
-  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
-  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
-[data-comfy-select]:focus{outline:none;border-color:#3b82f6;}
-[data-comfy-select][disabled]{opacity:.5;cursor:default;}
-[data-comfy-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;
-  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
-[data-comfy-msg][data-bad]{color:#ef4444;}
-[data-comfy-note][data-bad]{color:#ef4444;}
-[data-comfy-status]{flex:1;min-width:0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
-[data-comfy-status][data-bad]{color:#ef4444;}
-[data-comfy-btn]{flex:none;padding:7px 14px;border-radius:8px;border:1px solid transparent;cursor:pointer;
-  font-family:inherit;font-size:12px;background:#3b82f6;color:#fff;transition:opacity .15s;}
+[data-comfy-clear]{flex:none;height:28px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;
+  font-family:inherit;font-size:12px;line-height:18px;border:0;
+  background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);transition:background .15s,color .15s;}
+@media (hover:hover){[data-comfy-clear]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover-danger,rgba(239,68,68,.12));
+  color:var(--dsw-alias-state-error-primary);}}
+[data-comfy-clear]:focus-visible{outline:none;
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+[data-comfy-clear][disabled]{opacity:.4;cursor:default;}
+[data-comfy-pick]{flex:none;height:28px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;
+  font-family:inherit;font-size:12px;line-height:18px;
+  border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background:0 0;color:var(--dsw-alias-label-primary,inherit);transition:background .15s;}
+@media (hover:hover){[data-comfy-pick]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14));}}
+[data-comfy-pick]:focus-visible{outline:none;
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+[data-comfy-pick][disabled]{opacity:.4;cursor:default;}
+[data-comfy-select]{width:100%;box-sizing:border-box;padding:0 32px 0 10px;height:32px;
+  border-radius:var(--dsw-radius-md,12px);font-size:13px;cursor:pointer;appearance:none;
+  border:.5px solid var(--dsw-alias-border-l4,var(--dsw-alias-border-l3,rgba(128,128,128,.28)));
+  background-color:var(--dsw-alias-bg-layer-1,transparent);
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position:right 12px center;background-repeat:no-repeat;background-size:12px 12px;
+  color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
+[data-comfy-select]:focus{outline:none;border-color:var(--dsw-alias-state-business-primary);}
+[data-comfy-select][disabled]{opacity:.6;cursor:default;}
+[data-comfy-msg]{font-size:12px;line-height:18px;padding:10px 12px;border-radius:var(--dsw-radius-lg,16px);
+  background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.14));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-comfy-msg][data-bad]{color:var(--dsw-alias-state-error-primary);
+  background:var(--dsw-alias-interactive-bg-hover-danger,rgba(239,68,68,.12));}
+[data-comfy-note][data-bad]{color:var(--dsw-alias-state-error-primary);}
+[data-comfy-status]{flex:1;min-width:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+[data-comfy-status][data-bad]{color:var(--dsw-alias-state-error-primary);}
+[data-comfy-status][data-ok]{color:var(--dsw-alias-state-success-primary);}
+[data-comfy-btn]{flex:none;height:36px;padding:0 14px;border-radius:var(--dsw-radius-md,12px);border:0;cursor:pointer;
+  font-family:inherit;font-size:14px;line-height:22px;
+  background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));
+  color:var(--dsw-alias-label-primary-foreground);transition:background .15s,opacity .15s;}
+@media (hover:hover){[data-comfy-btn]:hover:not([disabled]){background:var(--dsw-alias-button-primary-hover,var(--dsw-alias-brand-primary));}}
 [data-comfy-btn][disabled]{opacity:.4;cursor:default;}
-[data-comfy-btn]:focus-visible{outline:2px solid #93c5fd;outline-offset:1px;}
-[data-comfy-savebar]{display:flex;align-items:center;gap:10px;padding-top:12px;
-  position:sticky;bottom:0;background:var(--dsw-specific-input-major,transparent);}
+[data-comfy-btn]:focus-visible{outline:none;
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+[data-comfy-savebar]{display:flex;align-items:center;gap:10px;padding:12px 2px 0;
+  border-top:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));
+  position:sticky;bottom:0;background:var(--dsw-alias-bg-base,transparent);}
 [data-comfy-drawbar]{display:flex;align-items:center;gap:6px;min-width:0;}
-[data-comfy-mini]{max-width:190px;box-sizing:border-box;padding:4px 6px;border-radius:7px;font-size:11px;cursor:pointer;
-  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
-  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
-[data-comfy-mini]:focus{outline:none;border-color:#3b82f6;}
-[data-comfy-mini][disabled]{opacity:.5;cursor:default;}
+[data-comfy-mini]{max-width:190px;box-sizing:border-box;height:26px;padding:0 24px 0 8px;border-radius:var(--dsw-radius-sm,8px);
+  font-size:12px;cursor:pointer;appearance:none;
+  border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background-color:var(--dsw-alias-bg-layer-1,rgba(128,128,128,.14));
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-position:right 8px center;background-repeat:no-repeat;background-size:12px 12px;
+  color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
+[data-comfy-mini]:focus{outline:none;border-color:var(--dsw-alias-state-business-primary);}
+[data-comfy-mini][disabled]{opacity:.6;cursor:default;}
 /* 展开的选项列表由浏览器自己画表面色，必须显式给底色与字色 —— 靠继承会在暗色下糊成白字白底 */
 [data-comfy-mini] option,
-[data-comfy-select] option{background:var(--dsw-specific-selector,#353638);
+[data-comfy-select] option{background:var(--dsw-alias-bg-layer-1,#353638);
   color:var(--dsw-alias-label-primary,#f9fafb);}
-[data-comfy-chip]{flex:none;padding:3px 8px;border-radius:11px;cursor:pointer;font-family:inherit;
-  font-size:11px;line-height:16px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));
-  background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);transition:background .15s,color .15s;}
-[data-comfy-chip][data-on]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
-[data-comfy-chip][disabled]{opacity:.45;cursor:default;}
+[data-comfy-chip]{flex:none;height:26px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;font-family:inherit;
+  font-size:12px;line-height:24px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));
+  background:0 0;color:var(--dsw-alias-label-secondary,#9aa0a6);transition:background .15s,color .15s;}
+[data-comfy-chip][data-on]{background:var(--dsw-alias-brand-primary);
+  border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);}
+[data-comfy-chip]:focus-visible{outline:none;
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+[data-comfy-chip][disabled]{opacity:.4;cursor:default;}
 `
 
     /* 读 configForms 命名空间的实时快照（form 可能不存在：对应插件没加载） */
@@ -630,6 +671,10 @@ window.__ModuleLoader__.load({
               : t('idleHint')
 
       return h('div', { 'data-comfy-settings': '' },
+        h('div', { 'data-comfy-page-title': '' },
+          h('div', { 'data-comfy-title': '' }, t('nav')),
+          h('div', { 'data-comfy-sub': '' }, t('pageHint'))),
+
         disabled ? h('div', { 'data-comfy-msg': '' }, t('readOnly')) : null,
 
         /* 审图 */
@@ -637,50 +682,56 @@ window.__ModuleLoader__.load({
           h('div', { 'data-comfy-sec-head': '' },
             h('div', { 'data-comfy-h': '' }, t('review')),
             h('div', { 'data-comfy-sub': '' }, t('reviewNote'))),
-          h(ToggleRow, {
-            label: t('reviewEnabled'),
-            on: view.review.enabled,
-            disabled,
-            onChange: (v) => set('review', 'enabled', v),
-          }),
-          // 模型选择器始终显示：还没打开上面的总开关时也能先挑好 / 看清有哪些能看图的模型
-          h(ModelPicker, {
-            label: t('choose'), note: t('chooseHint'),
-            provider: view.review.provider, model: view.review.model,
-            disabled, t,
-            onChange: (nextProvider, nextModel) => {
-              set('review', 'provider', nextProvider)
-              set('review', 'model', nextModel)
-            },
-          }),
-          h(TextRow, {
-            label: t('maxAttempts'), numeric: true,
-            value: view.review.maxAttempts, disabled,
-            onChange: (v) => set('review', 'maxAttempts', v),
-          }),
-          h(TextRow, {
-            label: t('extra'), note: t('extraHint'),
-            value: view.review.extra, disabled,
-            onChange: (v) => set('review', 'extra', v),
-          })),
+          h('div', { 'data-comfy-fields': '' },
+            h(ToggleRow, {
+              label: t('reviewEnabled'),
+              on: view.review.enabled,
+              disabled,
+              onChange: (v) => set('review', 'enabled', v),
+            }),
+            // 模型选择器始终显示：还没打开上面的总开关时也能先挑好 / 看清有哪些能看图的模型
+            h(ModelPicker, {
+              label: t('choose'), note: t('chooseHint'),
+              provider: view.review.provider, model: view.review.model,
+              disabled, t,
+              onChange: (nextProvider, nextModel) => {
+                set('review', 'provider', nextProvider)
+                set('review', 'model', nextModel)
+              },
+            }),
+            h(TextRow, {
+              label: t('maxAttempts'), numeric: true,
+              value: view.review.maxAttempts, disabled,
+              onChange: (v) => set('review', 'maxAttempts', v),
+            }),
+            h(TextRow, {
+              label: t('extra'), note: t('extraHint'),
+              value: view.review.extra, disabled,
+              onChange: (v) => set('review', 'extra', v),
+            }))),
 
         /* 功能开关：图生图 / 放大 */
         h('div', { 'data-comfy-sec': '' },
-          h('div', { 'data-comfy-h': '' }, t('features')),
-          h(ToggleRow, {
-            label: t('img2img'), note: t('img2imgHint'),
-            on: view.img2img.enabled, disabled,
-            onChange: (v) => set('img2img', 'enabled', v),
-          }),
-          h(ToggleRow, {
-            label: t('upscale'), note: t('upscaleHint'),
-            on: view.upscale.enabled, disabled,
-            onChange: (v) => set('upscale', 'enabled', v),
-          })),
+          h('div', { 'data-comfy-sec-head': '' },
+            h('div', { 'data-comfy-h': '' }, t('features')),
+            h('div', { 'data-comfy-sub': '' }, t('featuresNote'))),
+          h('div', { 'data-comfy-switches': '' },
+            h(ToggleRow, {
+              label: t('img2img'), note: t('img2imgHint'),
+              on: view.img2img.enabled, disabled,
+              onChange: (v) => set('img2img', 'enabled', v),
+            }),
+            h(ToggleRow, {
+              label: t('upscale'), note: t('upscaleHint'),
+              on: view.upscale.enabled, disabled,
+              onChange: (v) => set('upscale', 'enabled', v),
+            }))),
 
         /* 图片输出：只能靠「选择」按钮挑，不再提供手填框 */
         h('div', { 'data-comfy-sec': '' },
-          h('div', { 'data-comfy-h': '' }, t('output')),
+          h('div', { 'data-comfy-sec-head': '' },
+            h('div', { 'data-comfy-h': '' }, t('output')),
+            h('div', { 'data-comfy-sub': '' }, t('outputNote'))),
           h('div', { 'data-comfy-row': '' },
             h('div', { 'data-comfy-grow': '' },
               h('div', { 'data-comfy-label': '' }, t('outputDir')),
@@ -712,7 +763,9 @@ window.__ModuleLoader__.load({
 
         /* LoRA 提示词：目录里混放什么都行，挂 LoRA 出图时按内容挑一篇并进 prompt */
         h('div', { 'data-comfy-sec': '', 'data-comfy-lora-docs': '' },
-          h('div', { 'data-comfy-h': '' }, t('loraDocs')),
+          h('div', { 'data-comfy-sec-head': '' },
+            h('div', { 'data-comfy-h': '' }, t('loraDocs')),
+            h('div', { 'data-comfy-sub': '' }, t('loraDocsNote'))),
           h('div', { 'data-comfy-row': '' },
             h('div', { 'data-comfy-grow': '' },
               h('div', { 'data-comfy-label': '' }, t('loraDocsDir')),
@@ -764,6 +817,7 @@ window.__ModuleLoader__.load({
           h('div', {
             'data-comfy-status': '',
             'data-bad': status === 'error' ? '' : undefined,
+            'data-ok': status === 'saved' ? '' : undefined,
           }, noteText)),
       )
     }

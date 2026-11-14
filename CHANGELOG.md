@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-11-14
+
+### 变更
+
+- **设置页视觉对齐出厂设置页**：原来是一串「分段线 + 硬编码蓝色」的朴素表单，现在改用出厂设置页（模型 / 账号 / 插件清单）的同一套语言：
+  - **卡片分块**：每个分区从 `border-bottom` 分隔线改成独立卡片 —— `.5px solid var(--dsw-alias-settings-card-stroke)` + `background: var(--dsw-alias-settings-card-fill)` + `border-radius: var(--dsw-radius-xl)`（16px）+ `padding: 12px 14px`，面板宽度 640 → 720px（对齐出厂 `.section`）。
+  - **字号层级**：分区标题 14px/500/22px、字段名 12px/500/18px + `label-secondary`、说明与状态 12px/18px + `label-tertiary`；新增面板总标题（16px/500）与一行说明 —— 之前一进设置就直接是「审图」卡片，没有抬头。
+  - **输入框与选择器**：`.5px solid var(--dsw-alias-border-l4)` + `border-radius: var(--dsw-radius-md)` + `height: 32px` + `background: var(--dsw-alias-bg-layer-1)`；两个下拉框（审图模型、生图模型）加 `appearance: none` 与内联 SVG 箭头，不再依赖浏览器默认外观。
+  - **按钮**：「保存」改成出厂主按钮规格（`height: 36px` / `padding: 0 14px` / `button-primary-fill` / `label-primary-foreground` / hover `button-primary-hover`）；「选择」是次按钮（`border-l3` 描边、透明底、hover `interactive-bg-hover`）；「清除」是危险文字按钮（hover `interactive-bg-hover-danger` + `state-error-primary`）。三者 focus-visible 统一 `box-shadow: 0 0 0 2px var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary))`。
+  - **开关**：开启态用 `var(--dsw-alias-brand-primary)`、滑块用 `var(--dsw-alias-switch-thumb)`，跟随主题反色。
+  - **「功能开关」分区**：两个开关从上下堆叠改成 `grid` 自适应并排的小卡片（`auto-fit / minmax(220px, 1fr)`）。
+  - **对话栏绘图控件**：生图模型下拉 26px 高、`border-l3` 描边、`bg-layer-1` 底色、自带 12px 箭头；LoRA 芯片改成圆角小按钮（开 = 品牌色实心，关 = 描边）。
+  - **保存条**：加 `border-top` 与 `bg-base` 底色 —— 卡片化之后若还是透明底，滚动时会透出卡片内容。
+  - 保存成功的状态文字改用 `state-success-primary` 上色（`data-comfy-status[data-ok]`）。
+
+### 修复
+
+- **设置页里所有硬编码颜色都清掉了**：`#3b82f6`（品牌蓝，12 处）、`#ef4444`（错误红，4 处）、`#93c5fd`（focus 蓝，1 处）、`#fff`（按钮前景与滑块）一律换成主题 token —— 换主题（含暗色）时整页会跟着变，不再出现局部不跟随的情况。
+- 输入框、路径框、下拉框的底色从 `var(--dsw-specific-selector, rgba(128,128,128,.14))` 换成 `var(--dsw-alias-bg-layer-1)`：前者在暗色下是不透明的 `#353638`，压在卡片底上有明显的「贴片感」；后者本来就是主题的抬升层。
+
+### 测试
+
+- `test/config.test.mjs` 27 → **29** 条：
+  - 「绘图控件的底色与字色都用主题里真实存在的 token」跟着换掉 `--dsw-specific-selector` 的断言，改认 `--dsw-alias-bg-layer-1`。
+  - 新增「设置页的配色一律走主题 token，不硬编码品牌色与错误色」：禁 `#3b82f6` / `#ef4444` / `#93c5fd` / `#fff`，并要求 8 个出厂 token（卡片底、卡片描边、品牌色、主按钮、反色前景、开关滑块、错误色、成功色）都出现；另加一条正则禁止任何 `background|color|border-color|box-shadow` 直接写十六进制。
+  - 新增「设置页用卡片分块，不再用分隔线」：`[data-comfy-sec]` 规则里不许有 `border-bottom`，必须有 `radius-xl` 与两个 `settings-card-*` token。
+- 单测总数 119 → **121**。
+- `scripts/probe-client-bundle.mjs` 仍是 **25** 项（标记名没变：`data-comfy-sec-head` / `data-comfy-sub` / `data-comfy-savebar` / `data-comfy-lora-docs` / `data-comfy-doc-count` 全部保留），成功文案补一句「设置页卡片化与主题 token 上色」。
+
 ## [1.6.0] - 2026-11-14
 
 ### 新增

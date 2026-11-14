@@ -92,7 +92,7 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
   }
 
   console.log(ok
-    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 四条路由 / 保存按钮 / 输出目录与 LoRA 提示词两栏的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色 / 设置页的分区副标题、功能开关合并与 sticky 保存条，手填框与设置页 LoRA 都已移除'
+    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 四条路由 / 保存按钮 / 输出目录与 LoRA 提示词两栏的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色 / 设置页的分区副标题、功能开关合并与 sticky 保存条 / 设置页卡片化与主题 token 上色，手填框与设置页 LoRA 都已移除'
     : '\n✗ bundle 内容不是最新代码')
   process.exit(ok ? 0 : 1)
 })().catch((e) => { console.error(e); process.exit(1) })

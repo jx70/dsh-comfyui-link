@@ -32,7 +32,7 @@
 - **graph 模式接管任意工作流**：在 ComfyUI 里导出 API 格式的 JSON，直接交给模型跑，提示词和种子都能改。
 - **Web 与 Desktop 同一个包**：桌面端（Electron）页面是 `dsh-app://app/`，插件靠能力探测切到 preload 的 `__DSH_TRANSPORT__` 与 `__DSH_DIRECTORY_PICKER__`，浏览器里仍走原来的路。
 - **LoRA 提示词文档**：设置页里挑一个目录，一篇文档对应一个 LoRA；挂 LoRA 出图时会自动读对应那篇，把提示词段并进 `prompt`，并在结果里说明命中了哪篇。不选目录就一个文件都不读。
-- **可验证**：119 条纯单测 + 7 个探针脚本，全都不需要你手点。
+- **可验证**：121 条纯单测 + 7 个探针脚本，全都不需要你手点。
 
 ## 工具
 
@@ -168,6 +168,8 @@ dsh plugin --profile web remove dsh-comfyui-link
 ## 设置页
 
 DSH 设置 → ComfyUI 桥。改动先在本地攒成草稿（顶部会提示「有未保存的改动」），点底部的 **保存** 才写进 profile；写完不用重启 DSH 就生效。
+
+页面视觉与出厂设置页一致：每个分组是一张卡片（`settings-card-fill` 底 + `settings-card-stroke` 描边 + 16px 圆角），字段名与说明用主题的 `label-secondary` / `label-tertiary`，按钮和开关走 `button-primary-fill` / `brand-primary` / `switch-thumb`。**整页没有任何硬编码颜色**，亮色暗色都跟着主题变 —— 换皮肤不用改这里。
 
 | 分组 | 字段 | 默认 | 说明 |
 | --- | --- | --- | --- |

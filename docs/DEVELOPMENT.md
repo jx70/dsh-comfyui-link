@@ -40,7 +40,7 @@ npm install
 │   ├── helpers/fake-ctx.mjs  假 ctx（tools / systemPrompt / connection / llm / attachments）
 │   ├── graph.test.mjs        工作流构造与 HTTP 客户端（27 条）
 │   ├── registration.test.mjs 注册形状、开关拦截、四条路由、save_to（33 条）
-│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥 + 整合包 + 控件配色（27 条）
+│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥 + 整合包 + 控件配色 + 卡片化（29 条）
 │   ├── output.test.mjs       输出目录解析、重名不覆盖、复制落盘（4 条）
 │   ├── lora-docs.test.mjs    LoRA 提示词文档的打分、三档选择、子目录扫描、深度上限与同目录摆放（18 条）
 │   └── picker.test.mjs       原生文件夹选择框的纯函数与 POST 路由（9 条）
@@ -64,7 +64,7 @@ npm install
 ## 跑测试
 
 ```bash
-npm test          # 119 条纯单测，约 1 秒
+npm test          # 121 条纯单测，约 1 秒
 npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检查
 ```
 
@@ -223,12 +223,28 @@ function hostFetch(route, init) {
 
 ### 样式：只能用主题里定义过的 token
 
-`client.js` 的 CSS 是直接塞进页面的，写错 token 名不会报错 —— 它会安静地走兜底值，然后在某个主题下糊掉。踩过的两个：
+`client.js` 的 CSS 是直接塞进页面的，写错 token 名不会报错 —— 它会安静地走兜底值，然后在某个主题下糊掉。踩过的三个：
 
-- **`--dsw-alias-bg-layer-4` 不存在**。`@deepseek-ai/dsh-client-ui-theme` 的浅色块与深色块各 119 个 token，从 `bg-layer-1` 到 `bg-layer-3` 都有，**没有 4**。原来 6 处 `var(--dsw-alias-bg-layer-4, rgba(128,128,128,.12))` 因此永远落到那 12% 灰的半透明层，压在暗色卡片的 `#2c2c2e` 上等于没底色。要用输入框底色就写 `--dsw-specific-selector`（浅色 `#f5f6f7`、深色 `#353638`，不透明）或 `--dsw-specific-input-major`（卡片底，深色 `#2c2c2e`）。
+- **`--dsw-alias-bg-layer-4` 不存在**。`@deepseek-ai/dsh-client-ui-theme` 的浅色块与深色块各 119 个 token，从 `bg-layer-1` 到 `bg-layer-3` 都有，**没有 4**。原来 6 处 `var(--dsw-alias-bg-layer-4, rgba(128,128,128,.12))` 因此永远落到那 12% 灰的半透明层，压在暗色卡片的 `#2c2c2e` 上等于没底色。1.7.0 起输入框/路径框/下拉框统一用 `--dsw-alias-bg-layer-1`（主题的抬升层，压在卡片 `--dsw-alias-settings-card-fill` 上层次正好）。
 - **原生 `<select>` 的 `option` 必须显式给 `background` 和 `color`**。展开的选项列表由浏览器自己画表面色，`color: inherit` 拿到的近白色（`--dsw-alias-label-primary` 暗色 = `#f9fafb`）落到浅色弹层上就是「发白光」。现在 `[data-comfy-mini] option` 与 `[data-comfy-select] option` 都写死了底色与字色。
+- **品牌色 / 错误色也不许硬编码**。1.7.0 之前有 12 处 `#3b82f6`、4 处 `#ef4444`、1 处 `#93c5fd` 和若干 `#fff` —— 换主题时这些不会跟着变，暗色对比度也不受主题保证。改用 `--dsw-alias-brand-primary`、`--dsw-alias-button-primary-fill`、`--dsw-alias-button-primary-hover`、`--dsw-alias-label-primary-foreground`、`--dsw-alias-switch-thumb`、`--dsw-alias-state-business-primary`、`--dsw-alias-state-error-primary`、`--dsw-alias-state-success-primary`。**别在这些 token 后面再写颜色兜底值**（`var(--x,#3b82f6)` 等于把硬编码藏进兜底里）；要兜底就兜成 `transparent` 或中性灰。
 
-自查一条命令就够：把用到的 token 名跟主题里定义的取差集，`--dsw-alias-bg-layer-4` 会立刻露出来。`test/config.test.mjs` 里有一条守护钉住「不许再出现 bg-layer-4」「option 必须有规则」。
+自查一条命令就够：把用到的 token 名跟主题里定义的取差集，`--dsw-alias-bg-layer-4` 会立刻露出来。`test/config.test.mjs` 有三条守护钉着：不许再出现 `bg-layer-4`、`option` 必须有规则、配色一律走 token 且不许任何颜色声明直接写十六进制。
+
+**卡片规格从哪抄**：出厂设置页的 CSS 在 `@deepseek-ai/dsh-client-ui-settings-models/lib/client.js` 的 `css$3` 字符串里 —— `.rowCard`（`settings-card-fill` + `settings-card-stroke` + `radius-xl` + `12px 14px`）、`.rowName`（14/500/22）、`.fieldLabel`（12/500/18 + `label-secondary`）、`.input`（`border-l4` + `radius-md` + `height:32px` + `bg-layer-1`）、`.primaryButton`（`height:36px` + `button-primary-fill` + `label-primary-foreground`）、`.selectInput`（`appearance:none` + 内联 SVG 箭头 + `padding-right:32px`）。新加控件照着这套抄，页面才不会一块一块不一样。
+
+```bash
+# 用到的 token 与主题定义取差集（有输出就是写错了名字）
+# 主题包路径按自己的安装位置填：<dsh 安装目录>/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js
+node -e '
+const fs=require("node:fs");
+const theme=fs.readFileSync(process.env.THEME_JS,"utf8");
+const mine=fs.readFileSync("client.js","utf8");
+const defined=new Set((theme.match(/--dsw-[a-z0-9-]+/g)||[]));
+const used=new Set((mine.match(/--dsw-[a-z0-9-]+/g)||[]));
+console.log([...used].filter(n=>!defined.has(n)));
+'
+```
 
 ### 输出目录：三个纯函数 + 一条优先级
 

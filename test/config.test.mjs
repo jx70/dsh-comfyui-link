@@ -339,11 +339,45 @@ test('绘图控件的底色与字色都用主题里真实存在的 token', () =>
   // `--dsw-alias-bg-layer-4` 在主题里根本不存在，兜底成 12% 灰 —— 暗色下等于没有底色，
   // 而字色又是继承来的近白色，于是下拉文字看着像在发白光。
   assert.doesNotMatch(text, /--dsw-alias-bg-layer-4/)
-  assert.match(text, /var\(--dsw-specific-selector/)
+  assert.match(text, /var\(--dsw-alias-bg-layer-1/)
   assert.match(text, /var\(--dsw-alias-label-primary/)
   // 展开的选项由浏览器自己画表面色，必须显式给底色与字色，不能靠继承。
   assert.match(text, /\[data-comfy-mini\] option/)
   assert.match(text, /\[data-comfy-select\] option/)
+})
+
+test('设置页的配色一律走主题 token，不硬编码品牌色与错误色', () => {
+  const text = read('client.js')
+  // 硬编码 #3b82f6 在换主题后不会跟着变，暗色下对比度也不受主题保证。
+  assert.doesNotMatch(text, /#3b82f6/i)
+  assert.doesNotMatch(text, /#ef4444/i)
+  assert.doesNotMatch(text, /#93c5fd/i)
+  assert.doesNotMatch(text, /#fff\b/i)
+  // 出厂设置页那套 token：卡片底/描边、品牌色、主按钮、反色前景、开关滑块、状态色。
+  for (const token of [
+    '--dsw-alias-settings-card-fill',
+    '--dsw-alias-settings-card-stroke',
+    '--dsw-alias-brand-primary',
+    '--dsw-alias-button-primary-fill',
+    '--dsw-alias-label-primary-foreground',
+    '--dsw-alias-switch-thumb',
+    '--dsw-alias-state-error-primary',
+    '--dsw-alias-state-success-primary',
+  ]) {
+    assert.match(text, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), `缺少 ${token}`)
+  }
+  // 任何「颜色声明」都不许直接写十六进制。
+  assert.doesNotMatch(text, /(?:background|background-color|color|border-color|box-shadow)\s*:\s*#/i)
+})
+
+test('设置页用卡片分块，不再用分隔线', () => {
+  const text = read('client.js')
+  const sec = text.match(/\[data-comfy-sec\]\{[^}]*\}/)
+  assert.ok(sec, '没有 [data-comfy-sec] 规则')
+  assert.doesNotMatch(sec[0], /border-bottom/)
+  assert.match(sec[0], /border-radius:var\(--dsw-radius-xl/)
+  assert.match(sec[0], /var\(--dsw-alias-settings-card-fill/)
+  assert.match(sec[0], /var\(--dsw-alias-settings-card-stroke/)
 })
 
 test('README 不许给出会装到别人包的 npm 安装命令', () => {

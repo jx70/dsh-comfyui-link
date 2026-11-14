@@ -32,7 +32,7 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 - **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
 - **One package for Web and Desktop**: the Desktop (Electron) page is served from `dsh-app://app/`, so the plugin probes for the preload bridges (`__DSH_TRANSPORT__`, `__DSH_DIRECTORY_PICKER__`) and falls back to the ordinary browser path when they are absent.
 - **LoRA prompt documents**: pick a directory in the settings page, one document per LoRA. When a LoRA is attached, the matching document's prompt section is folded into `prompt` automatically and the result says which file was used. Leave the directory empty and not a single file is read.
-- **Verifiable**: 119 unit tests plus 7 probe scripts, none of which need you to click anything.
+- **Verifiable**: 121 unit tests plus 7 probe scripts, none of which need you to click anything.
 
 ## Tools
 
@@ -154,6 +154,8 @@ The model uses `comfy_run` in graph mode; the prompt is written into the `CLIPTe
 ## Settings page
 
 Settings → ComfyUI Bridge.
+
+The page follows the look of the shipped settings pages: every group is a card (`settings-card-fill` background, `settings-card-stroke` border, 16px radius), field names and notes use the theme's `label-secondary` / `label-tertiary`, and buttons and switches use `button-primary-fill` / `brand-primary` / `switch-thumb`. **Nothing on the page hardcodes a colour**, so light and dark both follow the theme — switching skins needs no edit here.
 
 | Group | Field | Default | Notes |
 | --- | --- | --- | --- |
