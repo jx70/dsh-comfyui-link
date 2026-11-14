@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### 变更
+
+- **README 里不再放示例图**：删掉 `docs/demo.png` 与中英 README 里的那张 `template` 模式示例图（连图注一起），`package.json` 的 `files` 里对应的 `!docs/demo.png` 排除项也一并去掉 —— 文件都没了，不必再排除。
+
 ## [1.7.0] - 2026-11-14
 
 ### 变更
@@ -209,7 +213,6 @@ All notable changes to this project are documented here.
 - **设置页「刷新」→「保存」**：删掉模型下拉旁边那颗「刷新」按钮（清单改为页面打开时自动取一次），改成面板底部的 **保存** 按钮 + 一行状态提示（`有未保存的改动` / `保存中…` / `已保存` / `保存失败`）。所有可编辑字段改为**草稿语义**：改动先留在本地，点保存才用一次 `form.mutate(ops)` 批量写入，成功后清空草稿。这样一次保存只产生一次 profile 写入与一次 revision 递增，而不是每敲一个字符写一次。
 - **系统提示重写**：新增一段说明「绘图模式的会话里，输入框左侧有绘图控件；别的模式没有这两个控件，要指定模型就显式传 `unet`，LoRA 用不了」；去掉 img2img / upscale 行里「都要先在设置页开开关」「审图模型在设置页下拉里挑」这类已经过时的指引。
 - **包名改为 `dsh-comfyui-link`**（原 `dsh-comfyui-bridge`）。原名在 npm 上已被他人占用（同名的 1.1.0 版本属于另一个维护者，本身也是 DSH 的 ComfyUI 桥），`add` 后面直接跟包名会装到别人的包。新名在 npm 与 GitHub 上都未占用。界面显示名不变，仍是「ComfyUI 桥 / ComfyUI Bridge」。
-- `package.json` 的 `files` 增加 `!docs/demo.png`：示例图只给 GitHub 看，不进 npm 包（`npm pack` 仍是 14 files）。
 
 ### 迁移
 

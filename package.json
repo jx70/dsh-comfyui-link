@@ -47,8 +47,7 @@
     "README.en.md",
     "LICENSE",
     "CHANGELOG.md",
-    "docs",
-    "!docs/demo.png"
+    "docs"
   ],
   "icon": "./icon.svg",
   "scripts": {

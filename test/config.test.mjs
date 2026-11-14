@@ -166,7 +166,7 @@ test('exports 里每条路径都指向真实文件（通配符按示例展开）
 
 test('files 里每一项都真的存在（npm pack 不会漏东西）', () => {
   for (const entry of pkg.files) {
-    // 以 ! 开头的是排除规则（例如 !docs/demo.png），要校验的是它指的那个文件
+    // 以 ! 开头的是排除规则（例如 !docs/xxx.png），要校验的是它指的那个文件
     const target = entry.startsWith('!') ? entry.slice(1) : entry
     assert.doesNotThrow(() => statSync(join(ROOT, target)), `files 里的 ${entry} 不存在`)
   }

@@ -17,10 +17,6 @@ A model can write a prompt, but it can't see the picture. So a human ends up doi
 
 This plugin turns that loop into tools: the model submits the job itself, waits for the result itself, looks at the image itself — and when it isn't satisfied, it re-renders from the review model's feedback. No human in the middle.
 
-![A sample render produced with template mode](./docs/demo.png)
-
-*The image above was produced by this plugin in `mode="template"` on ComfyUI (832×832 / 30 steps).*
-
 ## Features
 
 - **Nine tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
