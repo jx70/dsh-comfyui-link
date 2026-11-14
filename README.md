@@ -9,7 +9,7 @@
 
 > English: [README.en.md](./README.en.md)
 
-**目录** · [它解决什么问题](#它解决什么问题) · [特性](#特性) · [工具](#工具) · [绘图模式](#绘图模式) · [前置条件](#前置条件) · [安装](#安装) · [快速上手](#快速上手) · [设置页](#设置页) · [配置](#配置) · [工作原理](#工作原理) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题) · [开发](#开发) · [踩过的坑](#踩过的坑)
+**目录** · [它解决什么问题](#它解决什么问题) · [特性](#特性) · [工具](#工具) · [绘图模式](#绘图模式) · [前置条件](#前置条件) · [安装](#安装) · [快速上手](#快速上手) · [设置页](#设置页) · [配置](#配置) · [工作原理](#工作原理) · [桌面端](#桌面端) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题) · [开发](#开发) · [踩过的坑](#踩过的坑)
 
 ## 它解决什么问题
 
@@ -30,7 +30,8 @@
 - **图片输出目录可指定**：留空就只留在 ComfyUI 自己的 `output/`；选了一个目录则每次取图额外复制一份过去（同名不覆盖，自动加后缀），单次调用还能用 `save_to` 覆盖。目录不用手打 —— 设置页里只有一个「选择」按钮，点了直接弹系统文件夹选择框。
 - **零宿主内部依赖**：`lib/comfy.mjs` 只用 Node 自带的 `fetch`，不 import 任何 `@deepseek-ai/*`，可以脱离 DSH 单独跑（`npm run selftest` 就是干这个）。
 - **graph 模式接管任意工作流**：在 ComfyUI 里导出 API 格式的 JSON，直接交给模型跑，提示词和种子都能改。
-- **可验证**：82 条纯单测 + 7 个探针脚本，全都不需要你手点。
+- **Web 与 Desktop 同一个包**：桌面端（Electron）页面是 `dsh-app://app/`，插件靠能力探测切到 preload 的 `__DSH_TRANSPORT__` 与 `__DSH_DIRECTORY_PICKER__`，浏览器里仍走原来的路。
+- **可验证**：83 条纯单测 + 7 个探针脚本，全都不需要你手点。
 
 ## 工具
 
@@ -240,17 +241,30 @@ DSH 设置 → ComfyUI 桥。改动先在本地攒成草稿（顶部会提示「
 三层，彼此的边界很清楚：
 
 - `lib/comfy.mjs` —— 纯 HTTP 客户端 + 工作流构造（`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` 等），**不 import 任何 `@deepseek-ai/*`**，能脱离 DSH 单独跑
-- `index.js` —— Host 插件，注册 8 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册两条只读路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）
+- `index.js` —— Host 插件，注册 8 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册三条路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）、`POST /api/comfyui/pick-directory`（弹系统文件夹选择框）
 - `client.js` —— 浏览器半端，两处 UI：`settings.section` 槽位里的「ComfyUI 桥」设置页（草稿 + 保存），以及 `conversation.input.left` 槽位里的绘图控件（只在绘图模式渲染）
 
 `index.js` 里除了工具，还 `import z from '@deepseek-ai/schemastery'` 用来定义 `export const Config`。所以 `dependencies` 里只有它，没有别的运行期依赖。
 
 为什么要分成三层：工作流构造的 bug 不该需要启动整个宿主才能定位。`npm run selftest` 直接打 ComfyUI，几秒钟就能验证 `lib/` 有没有问题。设计取舍的完整说明在 [docs/DESIGN.md](./docs/DESIGN.md)。
 
+## 桌面端
+
+DSH Desktop（Electron）加载的是同一份 Web GUI、同一份 `client.js` —— `dsh.client.platform` 写 `web` 就够，不需要另发一套声明。差别只在**页面来源**：桌面端的页面是 `dsh-app://app/`，不是 http origin，所以相对 `/api/...` 的请求在那里解析不到宿主。插件为此做了两处适配：
+
+| 场景 | 浏览器 | 桌面端 |
+| --- | --- | --- |
+| 读模型清单、调路由 | 页面自己的 `fetch` | `globalThis.__DSH_TRANSPORT__.fetch`（preload 注入，收「文档相对」路径、自己解析到宿主） |
+| 「选择」目录 | 向宿主发 `POST /api/comfyui/pick-directory`，宿主 spawn `powershell.exe -STA` 弹框 | `globalThis.__DSH_DIRECTORY_PICKER__.pick()`，Electron 自己弹系统框（取消返回 `null`） |
+
+两处都是**能力探测**：有钩子就用钩子，没有就退回浏览器那条路。所以同一个 bundle 在 Web 与 Desktop 上都能跑，插件也不需要知道自己跑在哪儿。
+
+`hostFetch()` 会去掉前导斜杠再交给传输钩子 —— 出厂代码里 `createWebConnectionRpc` 拼的就是「channel/endpoint 去掉首斜杠」，HMR 的 `/plugins/events` 也是先 `.slice(1)` 再 fetch。别传 `/api/...` 全路径，那会被拼成 `dsh-app://app/api/...` 之类解析不到的东西。
+
 ## 兼容性与已知限制
 
 - **验证过的 ComfyUI 版本**：0.30.2。更老的版本大概率也能跑，但 `POST /api/jobs/{id}/cancel` 这类较新的端点可能不存在——`comfy_control` 的 `cancel` 在那种版本上会报 404，`interrupt` 仍然可用。
-- **只做 web profile**：`dsh.client.platform` 是 `web`，设置页与输入框左侧的绘图控件都要有浏览器才看得见。纯 CLI 场景下工具仍然可用，只是改不了开关（配置可以写在 `cordis.patch.yml` 里）。
+- **只做 web 客户端**：`dsh.client.platform` 是 `web`，设置页与输入框左侧的绘图控件都要有图形界面才看得见。桌面端（Electron）加载的是同一份 Web GUI，所以照常可用；纯 CLI 场景下工具仍然可用，只是改不了开关（配置可以写在 `cordis.patch.yml` 里）。
 - **内置模板只走三件套加载器**：`UNETLoader + CLIPLoader + VAELoader`。如果你的模型是整包 `checkpoints`，用 `mode="graph"` 传自己的 `CheckpointLoaderSimple` 工作流。
 - **放大是算法放大**：`ImageScale` 的 lanczos / bicubic 等，不加载放大模型（ESRGAN 之类）。要 AI 放大就自己搭工作流走 graph 模式。
 - **审图模型必须能收图**：设置页下拉里只列 `inputModalities` 含 `image` 的模型。纯文本模型选了也没用，请求会被下游拒。
@@ -290,7 +304,7 @@ npm run selftest              # 直接对着 ComfyUI 把 lib/comfy.mjs 走一遍
 npm run probe:route           # 假 ctx 抓 connection.fetch 路由，验模型筛选逻辑
 npm run probe:http            # 真打 HTTP，验路由确实在信任栅栏内部
 npm run probe:features        # 真出图：template / img2img / LoRA / upscale + 开关拦截
-npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新代码（DrawBar / 保存按钮 / 两条路由）
+npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新代码（DrawBar / 保存按钮 / 三条路由 / 桌面端两条桥）
 ```
 
 需要「真打 DSH」的探针（`probe:http` / `probe:bundle`）用环境变量找环境，取不到就跳过（exit 0），不会红一片：
@@ -326,6 +340,7 @@ npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新�
 - **前端槽位要靠标准 props 拿会话**：`conversation.input.left` 的组件能直接拿到 `sessionId` / `useSessions`，判断 preset 就照出厂 `AgentPresetLabel` 的写法读 `state.byId[sessionId].projectionValues.agentPreset`；自己的 form 句柄用注册处的 `inject: (sessionId) => ({...})` 透传。
 - **别用 `path.isAbsolute` 判平台路径**：它对 `X:/…` 在 Windows 上是真、在 Linux 上是假，同一份配置两个平台结论相反。插件用自己的 `looksAbsolute`（盘符式 / `/` 开头 / UNC），`output.dir` 的解析走它。
 - **改 `package.json` 别用 `Set-Content -Encoding UTF8`**：会给文件加 BOM，`npm test` 直接报 `SyntaxError: Unexpected token '﻿'`。用 node 的 `fs.writeFileSync(path, text, 'utf8')`。
+- **桌面端不能裸调 `fetch('/api/…')`**：桌面页面是 `dsh-app://app/`，相对路径会解析到那个自定义协议上，请求永远打不到宿主。要么走 `globalThis.__DSH_TRANSPORT__.fetch`（路径不带前导斜杠），要么先做能力探测再退回页面自己的 `fetch`。插件里统一走 `hostFetch()`。
 
 ## 许可
 

@@ -270,6 +270,18 @@ test('client.js 的模块 id 与 style 标记跟着包名走', () => {
   assert.doesNotMatch(text, /@local/)
 })
 
+test('client.js 的宿主请求走页面传输钩子，桌面端才找得到宿主', () => {
+  const text = read('client.js')
+  // 桌面端的页面来源是 dsh-app://app/，相对 /api 在那里解析不到宿主
+  assert.match(text, /globalThis\.__DSH_TRANSPORT__/)
+  assert.match(text, /function hostFetch\(route, init\)/)
+  // 三条路由都不能直接裸调 fetch
+  assert.doesNotMatch(text, /\bfetch\((VISION_API|DRAW_API|PICK_API)\b/)
+  // 桌面端优先用 preload 的原生目录桥，取消返回 null
+  assert.match(text, /globalThis\.__DSH_DIRECTORY_PICKER__/)
+  assert.match(text, /function desktopPicker\(\)/)
+})
+
 test('README 与 locale 里没有本机硬件实况（显卡/显存/具体模型文件名）', () => {
   for (const file of ['README.md', 'README.en.md']) {
     let text

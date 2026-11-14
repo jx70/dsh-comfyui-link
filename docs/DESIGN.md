@@ -5,6 +5,7 @@
 - [三层结构](#三层结构)
 - [为什么模型清单必须由宿主开路由](#为什么模型清单必须由宿主开路由)
 - [为什么「选择目录」要开一条 POST 路由，而且它会阻塞](#为什么选择目录要开一条-post-路由而且它会阻塞)
+- [桌面端：两条 preload 桥](#桌面端两条-preload-桥)
 - [工作流构造](#工作流构造)
 - [审图重生成的状态机](#审图重生成的状态机)
 - [volatile 字段与热生效](#volatile-字段与热生效)
@@ -21,9 +22,10 @@
 │   ctx.slots.register('settings.section')       │
 │   ctx.slots.register('conversation.input.left')│
 │   ctx.configForms.get('comfyui')               │
-│   fetch('/api/comfyui/vision-models')          │
-│   fetch('/api/comfyui/draw-models')            │
+│   hostFetch('/api/comfyui/vision-models')      │
+│   hostFetch('/api/comfyui/draw-models')        │
 │   POST('/api/comfyui/pick-directory')          │
+│   ── 桌面端：__DSH_TRANSPORT__ / __DSH_DIRECTORY_PICKER__│
 └───────────────────────┬───────────────────────┘
                         │ HTTP（带浏览器 cookie）
 ┌───────────────────────▼───────────────────────┐
@@ -46,13 +48,13 @@
 
 - `lib/comfy.mjs` 可以脱离 DSH 单独跑（`npm run selftest` 就是干这个），工作流构造的 bug 不用起整个宿主就能定位。
 - `index.js` 只负责「翻译成工具」，所有 HTTP 细节都下沉到 lib，工具函数体基本是线性的。
-- `client.js` 拿不到宿主服务（client 侧没有 `llm` / `tools`），所以它需要的一切数据都得由 host 侧开路由送过去。
+- `client.js` 拿不到宿主服务（client 侧没有 `llm` / `tools`），所以它需要的一切数据都得由 host 侧开路由送过去；桌面端还得借 preload 的传输桥才够得着那些路由。
 
 ## 为什么模型清单必须由宿主开路由
 
 设置页要列「能看图的模型」，这份清单在宿主里（`llm.listProviders()` / `listModels()` / `resolveModelInfo()`）。但浏览器半端拿不到 `llm` 服务，只能让 host 侧开一条只读路由。
 
-输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`，两条路由都是 `mountDataRoutes` 里同一个 `scope.effect` 注册的。
+输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`。三条路由（含后面那节讲的 `POST /api/comfyui/pick-directory`）都由 `mountDataRoutes` 里各自的 `scope.effect` 注册。
 
 **这条路由不能用 `webServer.register`。** DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面：
 
@@ -118,6 +120,25 @@ scope.effect(() => connection.fetch.register({
 **这一栏没有输入框。** 路径只能从系统对话框里挑（挑错了点「清除」，等于回到「图只留在 ComfyUI 的 output」）。所以 `output.dir` 的入口只有两个：原生对话框，或者直接改 profile 的 `cordis.patch.yml`。
 
 **非 Windows**：`powershellPath()` 返回 `''`，路由立刻回 `{ok:false, reason:'unsupported'}`，前端提示「这个平台没有系统文件夹选择框，输出目录在这里设不了」。没有手填框可以退，所以非 Windows 上改这一项只能去 profile 的 `cordis.patch.yml` 里写 `output.dir`。
+
+## 桌面端：两条 preload 桥
+
+DSH Desktop（Electron）加载的是同一份 Web GUI、同一份 `client.js` —— `dsh-client-modules` 的 `resolveMeta` 只服务 `dsh.client.platform === 'web'`，桌面端走的就是这条路，插件不需要另发一套声明。真正的差别只有一处：**页面来源**。桌面页面来自 `dsh-app://app/`（自定义协议），不是 http origin，所以相对 `/api/...` 的请求在那里解析不到宿主。
+
+出厂的几个 UI 包都显式处理过这件事（`dsh-client-ui-chat` / `dsh-client-ui-file-actions` / `dsh-client-ui-sidebar-documentpreview` 里都有 `if (!/^https?:/u.test(base) && !base.startsWith("dsh-app://app/") …) throw`），说明这是平台契约而不是偶发。插件用两个**能力探测**对齐：
+
+| 能力 | 探测对象 | 形状 | 没有时 |
+| --- | --- | --- | --- |
+| 打宿主的 HTTP 路由 | `globalThis.__DSH_TRANSPORT__.fetch` | `(path, init) => Promise<Response>`，收**文档相对**路径 | 退回页面自己的 `fetch` |
+| 弹系统文件夹选择框 | `globalThis.__DSH_DIRECTORY_PICKER__.pick` | `() => Promise<string \| null>`，取消返回 `null` | 走 `POST /api/comfyui/pick-directory` |
+
+两条都是「有就用、没有就回落」，所以同一个 bundle 在 Web 与 Desktop 上都能跑，插件也不需要知道自己跑在哪儿。
+
+**路径必须去掉前导斜杠。** 传给传输钩子的不是 `/api/...`，而是 `api/...` —— 出厂代码就是这么传的：`createWebConnectionRpc` 里 `send(\`${channel}/${endpoint}\`.slice(1), …)`，`dsh-client-hmr` 里 `const EVENTS_ROUTE = "/plugins/events".slice(1)`。`hostFetch()` 统一 `.replace(/^\/+/, '')`，别在别处另写一套。
+
+**为什么桌面端优先用原生桥，而不是继续让宿主 spawn PowerShell。** 桌面端本来就有 Electron 自己的对话框能力，走 preload 直接调它比「HTTP 打到宿主 → 宿主 spawn 子进程 → 子进程弹 WinForms」少两个进程和一次往返，而且不受宿主是否在 Windows 上、`powershell.exe` 在不在的影响。宿主那条 POST 路由仍保留 —— 浏览器端没有别的选择。
+
+**这两条桥没有类型声明。** 全仓 grep `__DSH_[A-Z_]+__` 能找到 16 个 preload 全局，但任何 `.d.ts` 里都没有它们的形状，只能照出厂运行时代码抄（`dsh-client-connection/lib/client.browser.js` 与 `dsh-client-ui-directory-picker-native/lib/client.js`）。改这两处之前先回去读那两个文件。
 
 ## 工作流构造
 
@@ -322,6 +343,6 @@ args.save_to  →  features.output.dir  →  ''（不复制）
 | `comfy_status` / `comfy_models` / `comfy_node` | 数十毫秒 |
 | 512×512 / 4 步出图 | 约 3 秒 |
 | 1024×1024 / 30 步出图 | 几十秒到两分钟 |
-| `npm test`（82 条纯单测） | 约 1 秒 |
+| `npm test`（83 条纯单测） | 约 1 秒 |
 
 所以 `comfy_result` 的 `wait_seconds` 要按尺寸给：512 给 30 就够，1024 给 120，多张按张数加。显存吃紧时 batch 保持 1，要腾地方用 `comfy_control free_vram`。

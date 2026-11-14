@@ -30,8 +30,8 @@ npm install
 
 ```
 .
-├── index.js                Host 插件：8 个工具 + 系统提示 + 两条只读路由 + Config
-├── client.js               浏览器半端：设置页（settings.section）+ 绘图控件（conversation.input.left）
+├── index.js                Host 插件：8 个工具 + 系统提示 + 三条路由（两条 GET + 一条 POST）+ Config
+├── client.js               浏览器半端：设置页（settings.section）+ 绘图控件（conversation.input.left）+ 桌面端两条 preload 桥
 ├── lib/comfy.mjs           纯 HTTP 客户端 + 工作流构造（零宿主依赖）
 ├── cordis.patch.yml        静态默认配置（baseUrl）+ 「绘图模式」preset 声明
 ├── locale/{zh,en}.json     插件名与描述的本地化
@@ -40,7 +40,7 @@ npm install
 │   ├── helpers/fake-ctx.mjs  假 ctx（tools / systemPrompt / connection / llm / attachments）
 │   ├── graph.test.mjs        工作流构造与 HTTP 客户端（22 条）
 │   ├── registration.test.mjs 注册形状、开关拦截、三条路由、save_to（23 条）
-│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护（24 条）
+│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥（25 条）
 │   ├── output.test.mjs       输出目录解析、重名不覆盖、复制落盘（4 条）
 │   └── picker.test.mjs       原生文件夹选择框的纯函数与 POST 路由（9 条）
 ├── scripts/
@@ -63,7 +63,7 @@ npm install
 ## 跑测试
 
 ```bash
-npm test          # 82 条纯单测，约 1 秒
+npm test          # 83 条纯单测，约 1 秒
 npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检查
 ```
 
@@ -102,7 +102,7 @@ node --test test/picker.test.mjs
 | `npm run e2e` | ✓ | | | 真出图全链路（512×512 / 4 步） |
 | `npm run probe:route` | | | | 假 ctx 验「能看图的模型」筛选 |
 | `npm run probe:http` | | ✓ | ✓ | 真打路由：带 cookie 200 / 不带 401 / 不存在 404 |
-| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（13 项标记） |
+| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（16 项标记） |
 | `npm run probe:features` | ✓ | | | template / img2img / LoRA / upscale + 开关拦截 |
 
 「需要凭据」的两个探针拿不到凭据时会**跳过并 exit 0**，所以别人的机器上跑它们不会红一片。
@@ -111,7 +111,7 @@ node --test test/picker.test.mjs
 
 - **`probe-route`**：给假 `llm` 三个 provider（两个能看图、一个纯文本），断言路由只留下能看图的模型、纯文本的被剔掉；再让 `llm` 抛异常，断言返回 500。它不碰网络，纯逻辑。
 - **`probe-http`**：真起一个 `Request` 打 `DSH_BASE` 上的路由。这条探针的价值在于**证明路由真的在信任栅栏内部** —— 如果哪天误改成 `webServer.register`，带 cookie 也不会是 200，这条会立刻红。它还顺带用「GET 打 pick-directory 得 404、POST 坏 JSON 得 400、POST 不带 cookie 得 401」钉住 POST 路由的方法匹配与鉴权，全程不弹窗。
-- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 13 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
+- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 16 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
 - **`probe-features`**：真出图。它会把 `index.js` import 两次（第二次带 `?off=<时间戳>` 绕开 ESM 缓存），一次全开关关着验拦截、一次开着验真跑（开的是 `draw:{unet:'',lora:true}`，即对话栏那颗胶囊的等价配置）。LoRA 段需要 `COMFY_LORA` 指定一个真实文件名，没设就跳过 —— 不能硬编码某个 LoRA 名，别人的机器上没有。
 
 ## 环境变量
@@ -171,7 +171,29 @@ presentCall  presentResult  projectContent  finalizeContent  deferLoading
 
 ### 模型清单路由不能用 webServer.register
 
-DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面，自己挂会被外层前缀路由先吃掉，表现是永远 401。必须走 `ctx.connection.fetch.register`（本插件有两条：`/api/comfyui/vision-models` 与 `/api/comfyui/draw-models`）。详见 [DESIGN.md](./DESIGN.md#为什么模型清单必须由宿主开路由)。
+DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面，自己挂会被外层前缀路由先吃掉，表现是永远 401。必须走 `ctx.connection.fetch.register`（本插件有三条：`GET /api/comfyui/vision-models`、`GET /api/comfyui/draw-models`、`POST /api/comfyui/pick-directory`）。详见 [DESIGN.md](./DESIGN.md#为什么模型清单必须由宿主开路由)。
+
+### 桌面端：两条 preload 桥 + 一个路径约定
+
+DSH Desktop 的页面来自 `dsh-app://app/`，**相对 `/api/...` 的请求在那里打不到宿主**。`client.js` 里所有宿主请求都走 `hostFetch(route, init)`：
+
+```js
+function hostFetch(route, init) {
+  const transport = globalThis.__DSH_TRANSPORT__
+  if (typeof transport?.fetch === 'function') {
+    const send = transport.fetch            // 出厂也是取出来裸调，不绑 this
+    return send(route.replace(/^\/+/, ''), init)
+  }
+  return globalThis.fetch(route, init)
+}
+```
+
+- **路径要去掉前导斜杠**。传输钩子收的是「文档相对」路径：出厂 `createWebConnectionRpc` 把请求发成去掉首字符的 `channel/endpoint`，HMR 也先对 `/plugins/events` 做 `.slice(1)`。写成 `/api/...` 会被解析到 `dsh-app://app/api/...` 上，永远 404。
+- **别裸调 `fetch(VISION_API)`**。`test/config.test.mjs` 有一条断言专门抓这个（`doesNotMatch(/\bfetch\((VISION_API|DRAW_API|PICK_API)\b/)`）。
+- **选目录优先走 `__DSH_DIRECTORY_PICKER__.pick()`**（`() => Promise<string | null>`，取消是 `null`）。桌面端由 Electron 自己弹框，比「HTTP 打宿主 → 宿主 spawn PowerShell」少两个进程；宿主那条 POST 路由留给浏览器。
+- **这两条桥没有类型声明**。全仓 `.d.ts` 里 grep 不到 `__DSH_TRANSPORT__` / `__DSH_DIRECTORY_PICKER__`，形状只能照 `dsh-client-connection/lib/client.browser.js` 与 `dsh-client-ui-directory-picker-native/lib/client.js` 抄。
+
+本机没装 DSH Desktop（`<home>/.dsh/profiles` 下也没有 desktop profile，`dsh\lib\bin.js` 直接拒绝 `--profile desktop`），所以这条路径只能靠「能力探测 + 回落」保证浏览器侧零变化，改完务必跑 `npm run probe:bundle` 确认 bundle 里两个全局都在。
 
 ### 对话栏控件的两个前提
 

@@ -9,7 +9,7 @@ Drive your own ComfyUI from [DeepSeek Harness](https://github.com/deepseek-ai/de
 
 > 中文说明见 [README.md](./README.md)
 
-**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Draw mode](#draw-mode) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [Configuration](#configuration) · [How it works](#how-it-works) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
+**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Draw mode](#draw-mode) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [Configuration](#configuration) · [How it works](#how-it-works) · [Desktop](#desktop) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
 
 ## The problem
 
@@ -30,7 +30,8 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 - **Configurable output directory**: leave it empty and images stay only in ComfyUI own `output/`; point it at a directory and every fetch is also copied there (existing files are never overwritten — a suffix is appended). A single call can override it with `save_to`, and the directory is chosen with a **Pick** button that opens the native folder dialog — there is no path text box.
 - **No host internals**: `lib/comfy.mjs` uses nothing but Node's built-in `fetch` and imports no `@deepseek-ai/*`, so it runs standalone (`npm run selftest` does exactly that).
 - **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
-- **Verifiable**: 82 unit tests plus 7 probe scripts, none of which need you to click anything.
+- **One package for Web and Desktop**: the Desktop (Electron) page is served from `dsh-app://app/`, so the plugin probes for the preload bridges (`__DSH_TRANSPORT__`, `__DSH_DIRECTORY_PICKER__`) and falls back to the ordinary browser path when they are absent.
+- **Verifiable**: 83 unit tests plus 7 probe scripts, none of which need you to click anything.
 
 ## Tools
 
@@ -235,10 +236,23 @@ Three layers with clear boundaries:
 
 Why three layers: a bug in workflow construction shouldn't require booting the whole host to locate. `npm run selftest` hits ComfyUI directly and verifies `lib/` in seconds. The full design rationale is in [docs/DESIGN.md](./docs/DESIGN.md).
 
+## Desktop
+
+DSH Desktop (Electron) loads the same Web GUI and the same `client.js` — `dsh.client.platform: "web"` is enough, no separate declaration is needed. The difference is the **page origin**: the Desktop page comes from `dsh-app://app/`, not an http origin, so a relative `/api/...` request cannot reach the host there. Two adaptations cover it:
+
+| Situation | Browser | Desktop |
+| --- | --- | --- |
+| Reading model lists, calling routes | the page's own `fetch` | `globalThis.__DSH_TRANSPORT__.fetch` (injected by the preload; takes document-relative paths and resolves them to the host itself) |
+| Picking a directory | `POST /api/comfyui/pick-directory`, the host spawns `powershell.exe -STA` | `globalThis.__DSH_DIRECTORY_PICKER__.pick()`, Electron shows the native dialog (cancel returns `null`) |
+
+Both are **capability probes**: use the bridge when it exists, otherwise fall back to the browser path. The same bundle therefore runs under Web and Desktop, and the plugin never needs to know which one it is in.
+
+`hostFetch()` strips the leading slash before handing the path to the transport bridge — that is what the shipped code does (in `createWebConnectionRpc` the request goes out as `channel/endpoint` with the first character sliced off, and HMR does the same to `/plugins/events`). Don't pass a full `/api/...` path: it would be resolved against `dsh-app://app/` and never reach the host.
+
 ## Compatibility and known limits
 
 - **Verified against ComfyUI 0.30.2.** Older versions most likely work, but newer endpoints such as `POST /api/jobs/{id}/cancel` may not exist there — `comfy_control`'s `cancel` would return 404 while `interrupt` still works.
-- **Web profile only**: `dsh.client.platform` is `web`, so the settings page needs a browser. Tools still work in pure CLI use; you just can't flip the switches there (put them in `cordis.patch.yml` instead).
+- **Web client only**: `dsh.client.platform` is `web`, so the settings page needs a graphical shell. DSH Desktop loads that same Web GUI, so it works there too; tools still work in pure CLI use, you just can't flip the switches there (put them in `cordis.patch.yml` instead).
 - **The built-in template only uses the three-piece loaders**: `UNETLoader + CLIPLoader + VAELoader`. If your models are all-in-one `checkpoints`, pass your own `CheckpointLoaderSimple` workflow via `mode="graph"`.
 - **Upscale is algorithmic**: `ImageScale` with lanczos / bicubic etc., not an upscale model (ESRGAN and friends). For AI upscaling, build your own workflow and use graph mode.
 - **The review model must accept images**: the settings dropdown only lists models whose `inputModalities` include `image`. A text-only model will be rejected downstream.
@@ -278,7 +292,7 @@ npm run selftest              # drive lib/comfy.mjs directly against ComfyUI (re
 npm run probe:route           # fake ctx, verify the vision-model filtering
 npm run probe:http            # real HTTP: verify the route sits inside the trust fence
 npm run probe:features        # real renders: template / img2img / LoRA / upscale + switch gating
-npm run probe:bundle          # verify the client bundle the browser receives contains the new code (DrawBar / save button / both routes)
+npm run probe:bundle          # verify the client bundle the browser receives contains the new code (DrawBar / save button / three routes / two desktop bridges)
 ```
 
 The probes that talk to a live DSH (`probe:http` / `probe:bundle`) read their environment from variables and **skip (exit 0)** when it's unavailable, so they don't paint CI red:
@@ -314,6 +328,7 @@ These cost real debugging time; writing them down saves you one round:
 - **Read the session through standard slot props**: a `conversation.input.left` component receives `sessionId` / `useSessions` directly; detect the preset the way the shipped `AgentPresetLabel` does — `state.byId[sessionId].projectionValues.agentPreset` — and pass your own handles in through `inject: (sessionId) => ({...})`.
 - **Don't use `path.isAbsolute` for platform-neutral checks**: it says true for `X:/…` on Windows and false on Linux, so one config yields opposite verdicts. The plugin has `looksAbsolute` (drive-letter form, leading `/`, leading UNC); `output.dir` is resolved through it.
 - **Don't edit `package.json` with `Set-Content -Encoding UTF8`**: it prepends a BOM and `npm test` fails with `SyntaxError: Unexpected token '﻿'`. Use node's `fs.writeFileSync(path, text, 'utf8')`.
+- **Desktop must not call `fetch('/api/…')` directly**: the Desktop page is `dsh-app://app/`, so a relative path resolves against that custom scheme and never reaches the host. Either use `globalThis.__DSH_TRANSPORT__.fetch` (paths without a leading slash) or probe for it and fall back to the page's own `fetch`. The plugin routes everything through `hostFetch()`.
 
 ## License
 

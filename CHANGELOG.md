@@ -5,6 +5,31 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-14
+
+### 新增
+
+- **桌面端（DSH Desktop / Electron）适配**：桌面端的页面来源是 `dsh-app://app/`，不是 http origin，所以相对 `/api/...` 的请求在那里解析不到宿主。`client.js` 新增 `hostFetch(route, init)`：有 `globalThis.__DSH_TRANSPORT__.fetch`（preload 注入）就用它，并把路径去掉前导斜杠（出厂 `createWebConnectionRpc` 与 HMR 都是这么传的）；没有就退回页面自己的 `fetch`。三条路由（vision / draw / pick）全部改走它。
+- **桌面端优先用原生目录桥**：`desktopPicker()` 探测 `globalThis.__DSH_DIRECTORY_PICKER__.pick()`（`{ pick: () => Promise<string|null> }`，取消返回 `null`）。有它就由 Electron 自己弹系统框，省掉宿主 spawn `powershell.exe` 那一圈；没有才走 `POST /api/comfyui/pick-directory`。两条路对调用方语义一致（取消都归一成 `''`）。
+- `test/config.test.mjs` 新增一条守护：`client.js` 必须含 `__DSH_TRANSPORT__` / `hostFetch` / `__DSH_DIRECTORY_PICKER__` / `desktopPicker`，且**不许**出现裸 `fetch(VISION_API|DRAW_API|PICK_API)`。
+
+### 变更
+
+- `dsh.client.platform` 仍是 `web` —— 桌面端加载的就是同一份 Web GUI、同一份 `client.js`，不需要另发声明（`dsh-client-modules` 的 `resolveMeta` 只服务 `platform === "web"`）。
+- README「兼容性与已知限制」里「只做 web profile」改成「只做 web 客户端」，并说明桌面端照常可用。
+
+### 注意
+
+- 传输钩子收的是**文档相对**路径。传 `/api/...` 全路径会被解析成 `dsh-app://app/api/...` 之类，永远打不到宿主 —— `hostFetch` 内部统一 `.replace(/^\/+/, '')`。
+- 桌面端目前无法在本机验证（这台机器没装 DSH Desktop，`<home>/.dsh/profiles` 下也没有 desktop profile，CLI 明确拒绝操作它）。适配只依赖出厂代码里已有的两个 preload 全局，且是能力探测、缺席即回落，所以浏览器行为零变化。
+- `__DSH_TRANSPORT__` / `__DSH_DIRECTORY_PICKER__` 在任何 `.d.ts` 里都没有类型声明，形状是照出厂运行时代码（`dsh-client-connection/lib/client.browser.js`、`dsh-client-ui-directory-picker-native/lib/client.js`）抄的。
+
+### 测试
+
+- 单测总数 82 → **83**（`test/config.test.mjs` 24 → 25）。
+- `scripts/probe-client-bundle.mjs` 标记 14 → **16** 项（新增 `hostFetch` / `desktopPicker`）。
+- 全套复跑：`npm test` 83/83、`npm run smoke` 8 工具全过（系统提示渲染 818 字符）、`npm run probe:bundle` 16 项全 true、`npm run probe:http` 三条路由全过。
+
 ## [1.3.0] - 2026-11-14
 
 ### 新增

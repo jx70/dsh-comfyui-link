@@ -245,6 +245,29 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /*
+     * 桌面端（Electron）的页面来源是 dsh-app://app/，相对 /api 的请求在那里解析不到宿主，
+     * 所以要走 preload 装的 __DSH_TRANSPORT__.fetch —— 它收「文档相对」的路径，自己
+     * 解析到宿主的 origin。浏览器里没有这个钩子，就用页面自己的 fetch。
+     */
+    function hostFetch(route, init) {
+      const transport = globalThis.__DSH_TRANSPORT__
+      if (typeof transport?.fetch === 'function') {
+        // 出厂写法是把钩子取出来当裸函数调（`const send = transport?.fetch`），
+        // 这里保持一样：不绑 this，也别传 /api/... 全路径。
+        const send = transport.fetch
+        return send(route.replace(/^\/+/, ''), init)
+      }
+      if (typeof globalThis.fetch !== 'function') throw new Error('这个页面没有可用的 fetch')
+      return globalThis.fetch(route, init)
+    }
+
+    /* 桌面端 preload 的原生目录选择桥；有它就不必让宿主去 spawn PowerShell */
+    function desktopPicker() {
+      const bridge = globalThis.__DSH_DIRECTORY_PICKER__
+      return typeof bridge?.pick === 'function' ? bridge : undefined
+    }
+
     /* 宿主侧的路由：列出能看图的模型（浏览器半端没有 llm 服务） */
     const VISION_API = '/api/comfyui/vision-models'
     /* 宿主侧的路由：列出 ComfyUI 里有哪些模型（浏览器半端没有 comfy 客户端） */
@@ -255,9 +278,24 @@ window.__ModuleLoader__.load({
     /**
      * 让宿主弹一个原生文件夹选择框，返回用户挑的路径。
      * 取消 / 平台不支持都返回 ''（调用方什么都不改）。
+     *
+     * 桌面端优先用 preload 的原生桥（Electron 自己弹框，取消就是 null）；
+     * 浏览器端没有这个桥，改走宿主的 POST 路由（宿主 spawn PowerShell）。
      */
     async function pickFolder(initial) {
-      const res = await fetch(PICK_API, {
+      const bridge = desktopPicker()
+      if (bridge) {
+        let picked
+        try {
+          picked = await bridge.pick()
+        } catch (error) {
+          const failure = new Error(error?.message ?? String(error))
+          failure.reason = 'failed'
+          throw failure
+        }
+        return typeof picked === 'string' ? picked : ''
+      }
+      const res = await hostFetch(PICK_API, {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'content-type': 'application/json' },
@@ -273,7 +311,7 @@ window.__ModuleLoader__.load({
     }
 
     async function loadVisionModels() {
-      const res = await fetch(VISION_API, { credentials: 'same-origin' })
+      const res = await hostFetch(VISION_API, { credentials: 'same-origin' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const body = await res.json()
       if (!body || body.ok !== true) throw new Error(body?.error || 'unknown error')
@@ -283,7 +321,7 @@ window.__ModuleLoader__.load({
     async function loadDrawModels() {
       let res
       try {
-        res = await fetch(DRAW_API, { credentials: 'same-origin' })
+        res = await hostFetch(DRAW_API, { credentials: 'same-origin' })
       } catch (error) {
         throw new Error(error?.message ?? String(error))
       }
