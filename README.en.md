@@ -31,7 +31,7 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 - **No host internals**: `lib/comfy.mjs` uses nothing but Node's built-in `fetch` and imports no `@deepseek-ai/*`, so it runs standalone (`npm run selftest` does exactly that).
 - **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
 - **One package for Web and Desktop**: the Desktop (Electron) page is served from `dsh-app://app/`, so the plugin probes for the preload bridges (`__DSH_TRANSPORT__`, `__DSH_DIRECTORY_PICKER__`) and falls back to the ordinary browser path when they are absent.
-- **Verifiable**: 83 unit tests plus 7 probe scripts, none of which need you to click anything.
+- **Verifiable**: 90 unit tests plus 7 probe scripts, none of which need you to click anything.
 
 ## Tools
 
@@ -56,8 +56,15 @@ Sessions in that preset get **two extra controls at the left of the composer**:
 
 | Control | Writes | Effect |
 | --- | --- | --- |
-| Image-model dropdown | `draw.unet` | Used whenever `comfy_run` / `comfy_review` omit `unet`; "auto" means the first file in `diffusion_models` |
+| Image-model dropdown | `draw.unet` | Used whenever `comfy_run` / `comfy_review` omit `unet`; "auto" means the first file in `diffusion_models`, or the first `checkpoints` entry when that folder is empty |
 | `LoRA` chip | `draw.lora` | Only when it is on may `comfy_run` / `comfy_review` attach `lora`; otherwise the call is rejected |
+
+The dropdown has two groups, and the group decides which loader the workflow uses:
+
+| Group | Comes from | Workflow | Notes |
+| --- | --- | --- | --- |
+| Diffusion models | `models/diffusion_models` | `UNETLoader + CLIPLoader + VAELoader` | A single diffusion model; it needs a separate text encoder and VAE |
+| Checkpoints | `models/checkpoints` | `CheckpointLoaderSimple` | One file carries MODEL/CLIP/VAE — Illustrious / 光辉 style SDXL checkpoints live here |
 
 Both write **immediately** (click and it takes effect — a different contract from the settings page's draft-then-save). They render only in that preset: the check is the session's `agentPreset` projection being `draw`, so other modes never show them, and the model is told that elsewhere it must pass `unet` explicitly and cannot use LoRA.
 
@@ -67,7 +74,7 @@ The preset declaration ships inside the plugin's own `cordis.patch.yml`, so inst
 
 - A working ComfyUI (looked for at `http://127.0.0.1:8188` by default)
 - DSH `>= 0.2.0-rc.1`, Node `>= 22`
-- The built-in txt2img template uses `UNETLoader + CLIPLoader + VAELoader`, so `models/diffusion_models`, `models/text_encoders` and `models/vae` each need at least one file. If you organise everything as `checkpoints`, use `mode="graph"` with your own workflow instead.
+- The built-in txt2img template has two loading paths: a name from `diffusion_models` goes through `UNETLoader + CLIPLoader + VAELoader` (so `models/text_encoders` and `models/vae` need at least one file each), while a name from `checkpoints` goes through `CheckpointLoaderSimple`, where one all-in-one file is enough (Illustrious / 光辉 style SDXL checkpoints). An empty `diffusion_models` is fine as long as `checkpoints` has something.
 
 ## Install
 
@@ -253,7 +260,7 @@ Both are **capability probes**: use the bridge when it exists, otherwise fall ba
 
 - **Verified against ComfyUI 0.30.2.** Older versions most likely work, but newer endpoints such as `POST /api/jobs/{id}/cancel` may not exist there — `comfy_control`'s `cancel` would return 404 while `interrupt` still works.
 - **Web client only**: `dsh.client.platform` is `web`, so the settings page needs a graphical shell. DSH Desktop loads that same Web GUI, so it works there too; tools still work in pure CLI use, you just can't flip the switches there (put them in `cordis.patch.yml` instead).
-- **The built-in template only uses the three-piece loaders**: `UNETLoader + CLIPLoader + VAELoader`. If your models are all-in-one `checkpoints`, pass your own `CheckpointLoaderSimple` workflow via `mode="graph"`.
+- **The built-in template handles both layouts**: a standalone model in `diffusion_models` uses the three-piece loaders, an all-in-one file in `checkpoints` uses `CheckpointLoaderSimple`. Whichever folder the name lives in decides the loader; on a name collision the checkpoint wins. A checkpoint name can be passed straight to `comfy_run`'s `unet`.
 - **Upscale is algorithmic**: `ImageScale` with lanczos / bicubic etc., not an upscale model (ESRGAN and friends). For AI upscaling, build your own workflow and use graph mode.
 - **The review model must accept images**: the settings dropdown only lists models whose `inputModalities` include `image`. A text-only model will be rejected downstream.
 - **Rendering is synchronous waiting**: `comfy_result` polls for up to `maxWaitSeconds`. A timeout doesn't lose the job — call it again.
@@ -276,7 +283,7 @@ Read the note at the right of the save row: `保存失败` carries a concrete re
 The plugin looks at `http://127.0.0.1:8188` by default. If ComfyUI runs on another host or port, override `baseUrl` in your profile's `cordis.patch.yml` (see [Configuration](#configuration)).
 
 **`comfy_models` says a folder is empty?**
-The built-in template needs all three of `diffusion_models` / `text_encoders` / `vae`. Add whichever is missing, or switch to `mode="graph"` with your own workflow.
+The built-in template needs one usable model: either something in `diffusion_models` (which also needs one file each in `text_encoders` / `vae`), or one all-in-one file in `checkpoints`. With both empty, use `mode="graph"` with your own workflow.
 
 **I changed the code but behaviour didn't change?**
 ESM caches modules — after editing `lib/*.mjs` or `index.js`, disable and re-enable the plugin, or restart DSH. After editing `client.js` you also need a backend restart, because the client bundle is built and cached.

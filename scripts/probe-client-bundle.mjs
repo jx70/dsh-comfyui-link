@@ -71,6 +71,11 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
       // 桌面端适配：宿主请求走 __DSH_TRANSPORT__，选目录优先用 preload 的原生桥
       hostFetch: res.text.includes('__DSH_TRANSPORT__'),
       desktopPicker: res.text.includes('__DSH_DIRECTORY_PICKER__'),
+      // 生图模型下拉要同时列 checkpoints 里的整合包（光辉这类），否则只看得见 diffusion_models
+      drawCheckpoints: res.text.includes('drawGroupCheckpoint'),
+      drawUnets: res.text.includes('drawGroupUnet'),
+      // 暗色下那组控件得看得清：底色换成主题里真实存在的 token，选项显式给底色与字色
+      optionSkin: res.text.includes('[data-comfy-mini] option'),
     }
     console.log(`  ${path.slice(0, 72)}…`)
     console.log(`    → ${res.status}，${res.text.length} 字节；${Object.entries(marks).map(([k, v]) => `${k}=${v}`).join(' ')}`)
@@ -79,7 +84,7 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
   }
 
   console.log(ok
-    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 三条路由 / 保存按钮 / 输出目录的选择按钮 / 桌面端两条桥，手填框与设置页 LoRA 都已移除'
+    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 三条路由 / 保存按钮 / 输出目录的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色，手填框与设置页 LoRA 都已移除'
     : '\n✗ bundle 内容不是最新代码')
   process.exit(ok ? 0 : 1)
 })().catch((e) => { console.error(e); process.exit(1) })

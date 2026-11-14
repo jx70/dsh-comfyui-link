@@ -72,7 +72,9 @@ window.__ModuleLoader__.load({
         drawBar: '绘图',
         drawModel: '生图模型',
         drawAuto: '自动（默认模型）',
-        drawHint: '出图时用这个扩散模型',
+        drawHint: '出图时用这个模型（整合包和三件套都能选）',
+        drawGroupUnet: '扩散模型（三件套）',
+        drawGroupCheckpoint: '整合包（光辉 / SDXL 检查点）',
         allowLora: '允许挂 LoRA（点一下关掉）',
         loraBlocked: 'LoRA 已关：不允许挂角色 LoRA（点一下打开）',
         drawLoadFailed: '读不到 ComfyUI 模型清单',
@@ -119,7 +121,9 @@ window.__ModuleLoader__.load({
         drawBar: 'Draw',
         drawModel: 'Diffusion model',
         drawAuto: 'Auto (default model)',
-        drawHint: 'The diffusion model used for generation',
+        drawHint: 'The model used for generation (checkpoints and standalone diffusion models both work)',
+        drawGroupUnet: 'Diffusion models',
+        drawGroupCheckpoint: 'Checkpoints (Illustrious / SDXL)',
         allowLora: 'LoRA allowed (click to turn off)',
         loraBlocked: 'LoRA off: character LoRAs are blocked (click to allow)',
         drawLoadFailed: 'Cannot read the ComfyUI model list',
@@ -143,35 +147,35 @@ window.__ModuleLoader__.load({
 [data-comfy-sw][data-on] i{left:19px;}
 [data-comfy-sw][disabled]{opacity:.45;cursor:default;}
 [data-comfy-input]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));
-  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
+  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
 [data-comfy-input]:focus{outline:none;border-color:#3b82f6;}
 [data-comfy-num]{width:88px;}
 [data-comfy-path]{box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;line-height:18px;
   min-height:32px;word-break:break-all;
-  border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));
-  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
+  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
 [data-comfy-path][data-empty]{color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-comfy-actions]{display:flex;flex:none;align-items:center;gap:6px;}
 [data-comfy-clear]{flex:none;padding:7px 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));
+  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
   background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);transition:opacity .15s,color .15s;}
-[data-comfy-clear]:hover{color:inherit;border-color:#ef4444;}
+[data-comfy-clear]:hover{color:var(--dsw-alias-label-primary,inherit);border-color:#ef4444;}
 [data-comfy-clear]:focus-visible{outline:2px solid #3b82f6;outline-offset:1px;}
 [data-comfy-clear][disabled]{opacity:.45;cursor:default;}
 [data-comfy-pick]{flex:none;padding:7px 12px;border-radius:8px;cursor:pointer;font-family:inherit;font-size:12px;
-  border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));
-  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;transition:opacity .15s;}
+  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);transition:opacity .15s;}
 [data-comfy-pick]:hover{border-color:#3b82f6;}
 [data-comfy-pick]:focus-visible{outline:2px solid #3b82f6;outline-offset:1px;}
 [data-comfy-pick][disabled]{opacity:.45;cursor:default;}
 [data-comfy-select]{width:100%;box-sizing:border-box;padding:7px 9px;border-radius:8px;font-size:12px;cursor:pointer;
-  border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));
-  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
+  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
 [data-comfy-select]:focus{outline:none;border-color:#3b82f6;}
 [data-comfy-select][disabled]{opacity:.5;cursor:default;}
 [data-comfy-msg]{font-size:11px;line-height:16px;padding:7px 9px;border-radius:8px;
-  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
+  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-comfy-msg][data-bad]{color:#ef4444;}
 [data-comfy-note][data-bad]{color:#ef4444;}
 [data-comfy-status]{flex:1;min-width:0;font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
@@ -182,12 +186,16 @@ window.__ModuleLoader__.load({
 [data-comfy-btn]:focus-visible{outline:2px solid #93c5fd;outline-offset:1px;}
 [data-comfy-drawbar]{display:flex;align-items:center;gap:6px;min-width:0;}
 [data-comfy-mini]{max-width:190px;box-sizing:border-box;padding:4px 6px;border-radius:7px;font-size:11px;cursor:pointer;
-  border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.14));
-  background:var(--dsw-alias-bg-layer-4,rgba(128,128,128,.12));color:inherit;font-family:inherit;}
+  border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
+  background:var(--dsw-specific-selector,rgba(128,128,128,.14));color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
 [data-comfy-mini]:focus{outline:none;border-color:#3b82f6;}
 [data-comfy-mini][disabled]{opacity:.5;cursor:default;}
+/* 展开的选项列表由浏览器自己画表面色，必须显式给底色与字色 —— 靠继承会在暗色下糊成白字白底 */
+[data-comfy-mini] option,
+[data-comfy-select] option{background:var(--dsw-specific-selector,#353638);
+  color:var(--dsw-alias-label-primary,#f9fafb);}
 [data-comfy-chip]{flex:none;padding:3px 8px;border-radius:11px;cursor:pointer;font-family:inherit;
-  font-size:11px;line-height:16px;border:1px solid var(--dsw-alias-border-l3,rgba(255,255,255,.18));
+  font-size:11px;line-height:16px;border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));
   background:transparent;color:var(--dsw-alias-label-tertiary,#9aa0a6);transition:background .15s,color .15s;}
 [data-comfy-chip][data-on]{background:#3b82f6;border-color:#3b82f6;color:#fff;}
 [data-comfy-chip][disabled]{opacity:.45;cursor:default;}
@@ -331,8 +339,12 @@ window.__ModuleLoader__.load({
         throw new Error(body?.error || `HTTP ${res.status}`)
       }
       const folders = body.folders || {}
+      const unets = Array.isArray(folders.diffusion_models) ? folders.diffusion_models : []
+      const checkpoints = Array.isArray(folders.checkpoints) ? folders.checkpoints : []
       return {
-        unets: Array.isArray(folders.diffusion_models) ? folders.diffusion_models : [],
+        unets,
+        checkpoints,
+        names: [...unets, ...checkpoints],
         loras: Array.isArray(folders.loras) ? folders.loras : [],
       }
     }
@@ -639,7 +651,7 @@ window.__ModuleLoader__.load({
      */
     function DrawBar({ form, t, sessionId, useSessions, defaultPresetOf }) {
       const snap = useForm(form)
-      const [models, setModels] = React.useState({ status: 'loading', unets: [], error: '' })
+      const [models, setModels] = React.useState({ status: 'loading', names: [], unets: [], checkpoints: [], error: '' })
       const [fallbackPreset, setFallbackPreset] = React.useState(undefined)
       const alive = React.useRef(true)
       React.useEffect(() => () => { alive.current = false }, [])
@@ -667,9 +679,11 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         if (!inDraw) return undefined
         loadDrawModels().then(
-          (next) => { if (alive.current) setModels({ status: 'ready', unets: next.unets, error: '' }) },
+          (next) => {
+            if (alive.current) setModels({ status: 'ready', names: next.names, unets: next.unets, checkpoints: next.checkpoints, error: '' })
+          },
           (error) => {
-            if (alive.current) setModels({ status: 'error', unets: [], error: error?.message ?? String(error) })
+            if (alive.current) setModels({ status: 'error', names: [], unets: [], checkpoints: [], error: error?.message ?? String(error) })
           },
         )
         return undefined
@@ -686,12 +700,23 @@ window.__ModuleLoader__.load({
         form.mutate([{ op: 'set', path: ['draw', key], value: v }]).catch(() => {})
       }
 
+      const total = models.unets.length + models.checkpoints.length
       const note = models.status === 'error'
         ? `${t('drawLoadFailed')}：${models.error}`
         : models.status === 'loading'
           ? t('loading')
-          : `${t('drawHint')}${models.unets.length > 0 ? `（${models.unets.length}）` : ''}`
-      const stale = unet !== '' && !models.unets.includes(unet)
+          : `${t('drawHint')}${total > 0 ? `（${total}）` : ''}`
+      const stale = unet !== '' && !models.names.includes(unet)
+      // 整合包（Illustrious / 光辉 这类）和三件套分两组列，选中的名字自己说明用哪种加载器
+      const groups = []
+      if (models.unets.length > 0) {
+        groups.push(h('optgroup', { key: 'unet', label: t('drawGroupUnet') },
+          models.unets.map((name) => h('option', { key: name, value: name }, name))))
+      }
+      if (models.checkpoints.length > 0) {
+        groups.push(h('optgroup', { key: 'ckpt', label: t('drawGroupCheckpoint') },
+          models.checkpoints.map((name) => h('option', { key: name, value: name }, name))))
+      }
 
       return h('div', { 'data-comfy-drawbar': '', title: note },
         h('select', {
@@ -704,7 +729,7 @@ window.__ModuleLoader__.load({
         },
           h('option', { value: '' }, t('drawAuto')),
           stale ? h('option', { value: unet }, unet) : null,
-          models.unets.map((name) => h('option', { key: name, value: name }, name))),
+          groups),
         h('button', {
           'data-comfy-chip': '',
           'data-on': lora ? '' : undefined,

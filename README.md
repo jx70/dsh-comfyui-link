@@ -31,7 +31,7 @@
 - **零宿主内部依赖**：`lib/comfy.mjs` 只用 Node 自带的 `fetch`，不 import 任何 `@deepseek-ai/*`，可以脱离 DSH 单独跑（`npm run selftest` 就是干这个）。
 - **graph 模式接管任意工作流**：在 ComfyUI 里导出 API 格式的 JSON，直接交给模型跑，提示词和种子都能改。
 - **Web 与 Desktop 同一个包**：桌面端（Electron）页面是 `dsh-app://app/`，插件靠能力探测切到 preload 的 `__DSH_TRANSPORT__` 与 `__DSH_DIRECTORY_PICKER__`，浏览器里仍走原来的路。
-- **可验证**：83 条纯单测 + 7 个探针脚本，全都不需要你手点。
+- **可验证**：90 条纯单测 + 7 个探针脚本，全都不需要你手点。
 
 ## 工具
 
@@ -56,8 +56,15 @@
 
 | 控件 | 写进哪 | 干什么 |
 | --- | --- | --- |
-| 生图模型下拉 | `draw.unet` | `comfy_run` / `comfy_review` 省略 `unet` 时就用它；选「自动」则用 `diffusion_models` 里第一个 |
+| 生图模型下拉 | `draw.unet` | `comfy_run` / `comfy_review` 省略 `unet` 时就用它；选「自动」则用 `diffusion_models` 里第一个，没有就用 `checkpoints` 里第一个 |
 | `LoRA` 胶囊 | `draw.lora` | 打开后才允许给 `comfy_run` / `comfy_review` 传 `lora`；关着时传会被拦下 |
+
+下拉分两组，选哪一组决定用哪种加载器：
+
+| 分组 | 来自 | 工作流 | 说明 |
+| --- | --- | --- | --- |
+| 扩散模型 | `models/diffusion_models` | `UNETLoader + CLIPLoader + VAELoader` | 单扩散模型，要另外有文本编码器和 VAE |
+| 整合包 | `models/checkpoints` | `CheckpointLoaderSimple` | 一个文件带 MODEL/CLIP/VAE，Illustrious / 光辉 这类 SDXL 检查点属于这组 |
 
 这两个控件是**即时写入**的（点完就生效，跟设置页的草稿+保存是两套语义）。它们只在这个模式的会话里渲染 —— 判断依据是会话的 `agentPreset` 投影等于 `draw`，别的模式完全看不到，模型也会被告知「别的模式没有这两个控件，要指定模型就显式传 `unet`，LoRA 用不了」。
 
@@ -81,7 +88,7 @@
 
 - 一个跑得起来的 ComfyUI（默认按 `http://127.0.0.1:8188` 找）
 - DSH `>= 0.2.0-rc.1`，Node `>= 22`
-- 内置文生图模板走 `UNETLoader + CLIPLoader + VAELoader` 三件套，所以 ComfyUI 的 `models/diffusion_models`、`models/text_encoders`、`models/vae` 三个目录里至少要各有**一个**文件。用 `checkpoints` 的组织方式也能用 —— 那种情况请走 `mode="graph"` 传自己的工作流。
+- 内置文生图模板有两种加载方式：`diffusion_models` 里有点名的模型就走 `UNETLoader + CLIPLoader + VAELoader` 三件套（那时 `models/text_encoders`、`models/vae` 至少各要有一个文件）；名字落在 `checkpoints` 里就走 `CheckpointLoaderSimple`，一个整合包文件就够（Illustrious / 光辉 这类 SDXL 检查点）。`diffusion_models` 空着也能只靠 `checkpoints` 跑。
 
 ## 安装
 
@@ -265,7 +272,7 @@ DSH Desktop（Electron）加载的是同一份 Web GUI、同一份 `client.js` �
 
 - **验证过的 ComfyUI 版本**：0.30.2。更老的版本大概率也能跑，但 `POST /api/jobs/{id}/cancel` 这类较新的端点可能不存在——`comfy_control` 的 `cancel` 在那种版本上会报 404，`interrupt` 仍然可用。
 - **只做 web 客户端**：`dsh.client.platform` 是 `web`，设置页与输入框左侧的绘图控件都要有图形界面才看得见。桌面端（Electron）加载的是同一份 Web GUI，所以照常可用；纯 CLI 场景下工具仍然可用，只是改不了开关（配置可以写在 `cordis.patch.yml` 里）。
-- **内置模板只走三件套加载器**：`UNETLoader + CLIPLoader + VAELoader`。如果你的模型是整包 `checkpoints`，用 `mode="graph"` 传自己的 `CheckpointLoaderSimple` 工作流。
+- **内置模板认两种模型组织方式**：`diffusion_models` 里的单模型走三件套加载器，`checkpoints` 里的整合包走 `CheckpointLoaderSimple`。名字落在哪个文件夹就用哪种加载器，同名时按整合包算。`checkpoints` 里的整合包名可以直接传给 `comfy_run` 的 `unet`。
 - **放大是算法放大**：`ImageScale` 的 lanczos / bicubic 等，不加载放大模型（ESRGAN 之类）。要 AI 放大就自己搭工作流走 graph 模式。
 - **审图模型必须能收图**：设置页下拉里只列 `inputModalities` 含 `image` 的模型。纯文本模型选了也没用，请求会被下游拒。
 - **出图是同步等待**：`comfy_result` 会在 `maxWaitSeconds` 内轮询。超时不会丢任务，再调一次就行。
@@ -288,7 +295,7 @@ DSH Desktop（Electron）加载的是同一份 Web GUI、同一份 `client.js` �
 插件默认找 `http://127.0.0.1:8188`。ComfyUI 装在别的机器或换了端口，就在 profile 的 `cordis.patch.yml` 里覆盖 `baseUrl`（见[配置](#配置)）。
 
 **`comfy_models` 说某个文件夹是空的？**
-内置模板要 `diffusion_models` / `text_encoders` / `vae` 三样都有货。缺哪个就补哪个，或者改用 `mode="graph"` 用自己的工作流。
+内置模板要的是一份能用的模型：`diffusion_models` 里有一个（那还需要 `text_encoders` / `vae` 各一个），或者 `checkpoints` 里有一个整合包。两条都空就只能用 `mode="graph"` 传自己的工作流。
 
 **改了代码但行为没变？**
 ESM 有模块缓存——改完 `lib/*.mjs` 或 `index.js` 要把插件 disable 再 enable，或者重启 DSH。改完 `client.js` 还要重启后端，客户端 bundle 有构建缓存。

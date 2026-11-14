@@ -7,6 +7,7 @@
 - [为什么「选择目录」要开一条 POST 路由，而且它会阻塞](#为什么选择目录要开一条-post-路由而且它会阻塞)
 - [桌面端：两条 preload 桥](#桌面端两条-preload-桥)
 - [工作流构造](#工作流构造)
+- [两种模型组织方式，两条加载路径](#两种模型组织方式两条加载路径)
 - [审图重生成的状态机](#审图重生成的状态机)
 - [volatile 字段与热生效](#volatile-字段与热生效)
 - [开关拦截](#开关拦截)
@@ -54,7 +55,7 @@
 
 设置页要列「能看图的模型」，这份清单在宿主里（`llm.listProviders()` / `listModels()` / `resolveModelInfo()`）。但浏览器半端拿不到 `llm` 服务，只能让 host 侧开一条只读路由。
 
-输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`。三条路由（含后面那节讲的 `POST /api/comfyui/pick-directory`）都由 `mountDataRoutes` 里各自的 `scope.effect` 注册。
+输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `checkpoints` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`。三条路由（含后面那节讲的 `POST /api/comfyui/pick-directory`）都由 `mountDataRoutes` 里各自的 `scope.effect` 注册。
 
 **这条路由不能用 `webServer.register`。** DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面：
 
@@ -142,13 +143,22 @@ DSH Desktop（Electron）加载的是同一份 Web GUI、同一份 `client.js` �
 
 ## 工作流构造
 
-### 为什么是 UNETLoader + CLIPLoader + VAELoader
+### 两种模型组织方式，两条加载路径
 
-内置模板不用 `CheckpointLoaderSimple`，而是三个 loader 分开加载。原因是现在常见的组织方式就是 UNET + 独立的文本编码器 + 独立的 VAE（尤其是 Qwen-Image、Flux 这类），而 `checkpoints` 目录经常是空的。三个 loader 的写法对「三个目录各有文件」的部署最稳。
+`models/` 下有两种装法，模板两种都认，靠**名字落在哪个文件夹**决定走哪条：
 
-用 `checkpoints` 组织方式的用户走 `mode="graph"` 传自己的工作流，这是明确的设计取舍，不是漏做。
+| 装法 | 文件夹 | 加载器 | 需要什么 |
+| --- | --- | --- | --- |
+| 单扩散模型 | `diffusion_models` | `UNETLoader` + `CLIPLoader` + `VAELoader` | 还要 `text_encoders` 与 `vae` 各有文件（Qwen-Image、Flux 这类是这种组织方式） |
+| 整合包 | `checkpoints` | `CheckpointLoaderSimple` | 一个文件就够，MODEL/CLIP/VAE 都从它的 0/1/2 号输出出来（Illustrious / 光辉 这类 SDXL 检查点） |
 
-### 节点图（`buildTxt2Img`，9 节点）
+`resolveModels()` 就是这个判断点：名字在 `checkpoints` 里 → 返回 `{checkpoint}`；在 `diffusion_models` 里 → 返回 `{unet, clip, vae}`；不点名时 `diffusion_models` 优先，空着才退回 `checkpoints`；同名时按整合包算（整合包更完整，缺 `text_encoders` / `vae` 也能跑）。
+
+只走三件套是不行的：只装了整合包的机器上 `diffusion_models` 与 `text_encoders` 都是空的，模板会直接报「一个模型都没有」——而这类机器正是最常见的那种（下载一个 6.6 GB 的 SDXL 检查点就能画）。反过来只走整合包也不行：Qwen-Image / Flux 这类模型根本没有整包文件。
+
+### 节点图（`buildTxt2Img`）
+
+三件套（`diffusion_models`）9 个节点：
 
 | id | class_type | 作用 |
 | --- | --- | --- |
@@ -162,9 +172,21 @@ DSH Desktop（Electron）加载的是同一份 Web GUI、同一份 `client.js` �
 | `8` | `VAEDecode` | 解码 |
 | `9` | `SaveImage` | 落盘 |
 
+整合包（`checkpoints`）7 个节点 —— **节点号整体前移**，所以 `comfy_run` 的摘要不能写死 `graph[1].unet_name` / `graph[7]`：
+
+| id | class_type | 作用 |
+| --- | --- | --- |
+| `1` | `CheckpointLoaderSimple` | 一个文件带出 MODEL(0) / CLIP(1) / VAE(2) |
+| `2` | `CLIPTextEncode` | 正面提示词，`clip` 接 `['1', 1]` |
+| `3` | `CLIPTextEncode` | 负面提示词，`clip` 接 `['1', 1]` |
+| `4` | `EmptyLatentImage` | 尺寸（SDXL 系用普通的空白潜空间） |
+| `5` | `KSampler` | 采样，`model` 接 `['1', 0]` |
+| `6` | `VAEDecode` | 解码，`vae` 接 `['1', 2]` |
+| `7` | `SaveImage` | 落盘 |
+
 默认值：1024×1024、30 步、CFG 4.9、`euler` / `simple`、denoise 1。
 
-挂 LoRA 时插一个节点 `10`（`LoraLoader`），并把 `4` / `5` 的 `clip` 输入与 `7` 的 `model` 输入改接到它上面：
+挂 LoRA 时插一个节点（三件套是 `10`，整合包是 `8`，都是 `LoraLoader`），并把两条提示词的 `clip` 输入与采样器的 `model` 输入改接到它上面：
 
 ```js
 graph[10] = {
@@ -226,7 +248,7 @@ comfy_review(prompt_id, requirement[, reference_prompt_id])
 几个实现细节：
 
 - **审图模型来自设置页**：`review.provider` / `review.model`，两个都留空则回退到当前会话的模型（`exec.agent.options`）。所以「审图模型」和「画图的模型」可以是两个不同的模型。
-- **重画用哪个扩散模型**：`draw.unet`（绘图控件选的那个）；没选就退回 `diffusion_models` 里第一个。这样「审图不满意 → 重画」出来的仍是同一风格，不会忽然换成文件夹里第一个模型。
+- **重画用哪个生图模型**：`draw.unet`（绘图控件选的那个）；没选就退回 `diffusion_models` 里第一个，再退回 `checkpoints` 里第一个。这样「审图不满意 → 重画」出来的仍是同一风格，不会忽然换成文件夹里第一个模型。
 - **参考图不是要求的一部分**：`reference_prompt_id` 的图只是拿来比对的参照物，图里的内容（比如参考图是海边）不该被算进「必须还原」的要求里。提示词里明确写了这一点，否则模型会拿参考图的背景当要求。
 - **模型输出是 JSON**：`llm.stream()` 收 `text-delta` 拼起来再 `JSON.parse`。解析失败按「不满意 + 无新提示词」处理，不会崩。
 - **`maxAttempts` 的语义是「重画次数」**，不含首轮。所以 `maxAttempts=1` 最多出 2 张图（首图 + 1 次重画）。
@@ -343,6 +365,6 @@ args.save_to  →  features.output.dir  →  ''（不复制）
 | `comfy_status` / `comfy_models` / `comfy_node` | 数十毫秒 |
 | 512×512 / 4 步出图 | 约 3 秒 |
 | 1024×1024 / 30 步出图 | 几十秒到两分钟 |
-| `npm test`（83 条纯单测） | 约 1 秒 |
+| `npm test`（90 条纯单测） | 约 1 秒 |
 
 所以 `comfy_result` 的 `wait_seconds` 要按尺寸给：512 给 30 就够，1024 给 120，多张按张数加。显存吃紧时 batch 保持 1，要腾地方用 `comfy_control free_vram`。

@@ -38,9 +38,9 @@ npm install
 ├── icon.svg                设置页图标
 ├── test/
 │   ├── helpers/fake-ctx.mjs  假 ctx（tools / systemPrompt / connection / llm / attachments）
-│   ├── graph.test.mjs        工作流构造与 HTTP 客户端（22 条）
+│   ├── graph.test.mjs        工作流构造与 HTTP 客户端（27 条）
 │   ├── registration.test.mjs 注册形状、开关拦截、三条路由、save_to（23 条）
-│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥（25 条）
+│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥 + 整合包 + 控件配色（27 条）
 │   ├── output.test.mjs       输出目录解析、重名不覆盖、复制落盘（4 条）
 │   └── picker.test.mjs       原生文件夹选择框的纯函数与 POST 路由（9 条）
 ├── scripts/
@@ -63,7 +63,7 @@ npm install
 ## 跑测试
 
 ```bash
-npm test          # 83 条纯单测，约 1 秒
+npm test          # 90 条纯单测，约 1 秒
 npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检查
 ```
 
@@ -102,7 +102,7 @@ node --test test/picker.test.mjs
 | `npm run e2e` | ✓ | | | 真出图全链路（512×512 / 4 步） |
 | `npm run probe:route` | | | | 假 ctx 验「能看图的模型」筛选 |
 | `npm run probe:http` | | ✓ | ✓ | 真打路由：带 cookie 200 / 不带 401 / 不存在 404 |
-| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（16 项标记） |
+| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（19 项标记） |
 | `npm run probe:features` | ✓ | | | template / img2img / LoRA / upscale + 开关拦截 |
 
 「需要凭据」的两个探针拿不到凭据时会**跳过并 exit 0**，所以别人的机器上跑它们不会红一片。
@@ -111,7 +111,7 @@ node --test test/picker.test.mjs
 
 - **`probe-route`**：给假 `llm` 三个 provider（两个能看图、一个纯文本），断言路由只留下能看图的模型、纯文本的被剔掉；再让 `llm` 抛异常，断言返回 500。它不碰网络，纯逻辑。
 - **`probe-http`**：真起一个 `Request` 打 `DSH_BASE` 上的路由。这条探针的价值在于**证明路由真的在信任栅栏内部** —— 如果哪天误改成 `webServer.register`，带 cookie 也不会是 200，这条会立刻红。它还顺带用「GET 打 pick-directory 得 404、POST 坏 JSON 得 400、POST 不带 cookie 得 401」钉住 POST 路由的方法匹配与鉴权，全程不弹窗。
-- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 16 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
+- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 19 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`、`drawGroupUnet`、`drawGroupCheckpoint`、`[data-comfy-mini] option`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
 - **`probe-features`**：真出图。它会把 `index.js` import 两次（第二次带 `?off=<时间戳>` 绕开 ESM 缓存），一次全开关关着验拦截、一次开着验真跑（开的是 `draw:{unet:'',lora:true}`，即对话栏那颗胶囊的等价配置）。LoRA 段需要 `COMFY_LORA` 指定一个真实文件名，没设就跳过 —— 不能硬编码某个 LoRA 名，别人的机器上没有。
 
 ## 环境变量
@@ -217,6 +217,15 @@ function hostFetch(route, init) {
 另外两条契约：这条路由是**阻塞**的（`PICK_TIMEOUT_MS = 180_000` 自己兜，宿主 webserver 没配 `requestTimeout`），并且必须有 `picking` 布尔挡连点（第二个请求 409）。这些都由 `test/picker.test.mjs` 钉住；那个文件**不弹窗**，跑测试不会突然冒出对话框。
 
 还有一条**界面约定**：输出目录那一栏**没有输入框**，路径只能从对话框里挑（挑错了点「清除」）。所以别顺手把 `TextRow` 的 `action` 分支加回来 —— `probe:bundle` 里 `noInline: !includes('data-comfy-inline')` 会立刻红。非 Windows 上这一项只能在 profile 的 `cordis.patch.yml` 里写 `output.dir`。
+
+### 样式：只能用主题里定义过的 token
+
+`client.js` 的 CSS 是直接塞进页面的，写错 token 名不会报错 —— 它会安静地走兜底值，然后在某个主题下糊掉。踩过的两个：
+
+- **`--dsw-alias-bg-layer-4` 不存在**。`@deepseek-ai/dsh-client-ui-theme` 的浅色块与深色块各 119 个 token，从 `bg-layer-1` 到 `bg-layer-3` 都有，**没有 4**。原来 6 处 `var(--dsw-alias-bg-layer-4, rgba(128,128,128,.12))` 因此永远落到那 12% 灰的半透明层，压在暗色卡片的 `#2c2c2e` 上等于没底色。要用输入框底色就写 `--dsw-specific-selector`（浅色 `#f5f6f7`、深色 `#353638`，不透明）或 `--dsw-specific-input-major`（卡片底，深色 `#2c2c2e`）。
+- **原生 `<select>` 的 `option` 必须显式给 `background` 和 `color`**。展开的选项列表由浏览器自己画表面色，`color: inherit` 拿到的近白色（`--dsw-alias-label-primary` 暗色 = `#f9fafb`）落到浅色弹层上就是「发白光」。现在 `[data-comfy-mini] option` 与 `[data-comfy-select] option` 都写死了底色与字色。
+
+自查一条命令就够：把用到的 token 名跟主题里定义的取差集，`--dsw-alias-bg-layer-4` 会立刻露出来。`test/config.test.mjs` 里有一条守护钉住「不许再出现 bg-layer-4」「option 必须有规则」。
 
 ### 输出目录：三个纯函数 + 一条优先级
 

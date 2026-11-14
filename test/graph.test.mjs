@@ -212,6 +212,29 @@ test('resolveModels 不点名就用文件夹里第一个', () => {
   assert.deepEqual(resolveModels(index), { unet: 'd1', clip: 't1', vae: 'v1' })
 })
 
+test('resolveModels 认得 checkpoints 里的整合包，一个名字就够了', () => {
+  const index = {
+    diffusion_models: ['d1'],
+    checkpoints: ['Illustrious-XL-v2.0.safetensors'],
+    text_encoders: ['t1'],
+    vae: ['v1'],
+  }
+  // 点整合包的名字 → 走 CheckpointLoaderSimple，不再需要 clip/vae
+  assert.deepEqual(resolveModels(index, { unet: 'Illustrious-XL-v2.0.safetensors' }), {
+    checkpoint: 'Illustrious-XL-v2.0.safetensors',
+  })
+  // 点三件套的名字 → 还是三件套
+  assert.deepEqual(resolveModels(index, { unet: 'd1' }), { unet: 'd1', clip: 't1', vae: 'v1' })
+  // 不点名时 diffusion_models 优先
+  assert.deepEqual(resolveModels(index), { unet: 'd1', clip: 't1', vae: 'v1' })
+})
+
+test('resolveModels 只有 checkpoints 时退回整合包，不再要求 text_encoders / vae', () => {
+  const index = { diffusion_models: [], checkpoints: ['ck1.safetensors'], text_encoders: [], vae: [] }
+  assert.deepEqual(resolveModels(index), { checkpoint: 'ck1.safetensors' })
+  assert.deepEqual(resolveModels(index, { unet: 'ck1.safetensors' }), { checkpoint: 'ck1.safetensors' })
+})
+
 test('resolveModels 点名了就必须存在，否则把可选清单报出来', () => {
   const index = { diffusion_models: ['d1', 'd2'], text_encoders: ['t1'], vae: ['v1'] }
   assert.deepEqual(resolveModels(index, { unet: 'd2' }).unet, 'd2')
@@ -220,9 +243,42 @@ test('resolveModels 点名了就必须存在，否则把可选清单报出来', 
     (error) => error instanceof ComfyError && error.code === 'MODEL' && /d1, d2/.test(error.message),
   )
   assert.throws(
-    () => resolveModels({ diffusion_models: [], text_encoders: ['t1'], vae: ['v1'] }),
+    () => resolveModels({ diffusion_models: [], checkpoints: [], text_encoders: ['t1'], vae: ['v1'] }),
     (error) => error instanceof ComfyError && /一个模型都没有/.test(error.message),
   )
+})
+
+test('buildTxt2Img 给 checkpoint 时只用一个 CheckpointLoaderSimple 带出三件', () => {
+  const graph = buildTxt2Img({ checkpoint: 'ck.safetensors', prompt: 'p', negative: 'n' })
+  assert.equal(Object.keys(graph).length, 7)
+  assert.equal(graph[1].class_type, 'CheckpointLoaderSimple')
+  assert.equal(graph[1].inputs.ckpt_name, 'ck.safetensors')
+  assert.equal(graph[2].class_type, 'CLIPTextEncode')
+  assert.equal(graph[4].class_type, 'EmptyLatentImage')
+  assert.deepEqual(graph[5].inputs.model, ['1', 0])
+  assert.deepEqual(graph[5].inputs.positive, ['2', 0])
+  assert.deepEqual(graph[6].inputs.vae, ['1', 2])
+  assert.equal(graph[7].class_type, 'SaveImage')
+})
+
+test('buildTxt2Img 的整合包分支挂 LoRA 时插节点 8 并改接 model/clip', () => {
+  const graph = buildTxt2Img({ checkpoint: 'ck.safetensors', prompt: 'p', negative: 'n', lora: 'style.safetensors', loraStrength: 0.7 })
+  assert.equal(graph[8].class_type, 'LoraLoader')
+  assert.equal(graph[8].inputs.lora_name, 'style.safetensors')
+  assert.deepEqual(graph[2].inputs.clip, ['8', 1])
+  assert.deepEqual(graph[3].inputs.clip, ['8', 1])
+  assert.deepEqual(graph[5].inputs.model, ['8', 0])
+})
+
+test('buildImg2Img 给 checkpoint 时节点号跟着换，且连线仍用字符串 id', () => {
+  const graph = buildImg2Img({ checkpoint: 'ck.safetensors', imageName: 'src.png', prompt: 'p', negative: 'n', denoise: 0.4 })
+  assert.equal(graph[1].class_type, 'CheckpointLoaderSimple')
+  assert.equal(graph[4].class_type, 'LoadImage')
+  assert.equal(graph[5].class_type, 'VAEEncode')
+  assert.equal(graph[6].class_type, 'KSampler')
+  assert.equal(graph[6].inputs.denoise, 0.4)
+  assert.equal(graph[8].class_type, 'SaveImage')
+  for (const link of links(graph)) assert.equal(typeof link.to, 'string')
 })
 
 test('humanDuration 转成人话，非法输入返回空串', () => {

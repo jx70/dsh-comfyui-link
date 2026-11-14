@@ -282,6 +282,16 @@ test('client.js 的宿主请求走页面传输钩子，桌面端才找得到宿�
   assert.match(text, /function desktopPicker\(\)/)
 })
 
+test('生图模型下拉同时列 checkpoints 里的整合包，不再只认 diffusion_models', () => {
+  const client = read('client.js')
+  assert.match(client, /drawGroupCheckpoint/)
+  assert.match(client, /drawGroupUnet/)
+  assert.match(client, /folders\.checkpoints/)
+  // 宿主那条路由必须把 checkpoints 一起发出来
+  const index = read('index.js')
+  assert.match(index, /checkpoints: index\.checkpoints \?\? \[\]/)
+})
+
 test('README 与 locale 里没有本机硬件实况（显卡/显存/具体模型文件名）', () => {
   for (const file of ['README.md', 'README.en.md']) {
     let text
@@ -316,6 +326,18 @@ test('旧的包名不许复活（它和 npm 上别人的包重名）', () => {
     if (read(file).includes(retired)) offenders.push(file)
   }
   assert.deepEqual(offenders, [], `这些文件里还有旧包名：${offenders.join(', ')}`)
+})
+
+test('绘图控件的底色与字色都用主题里真实存在的 token', () => {
+  const text = read('client.js')
+  // `--dsw-alias-bg-layer-4` 在主题里根本不存在，兜底成 12% 灰 —— 暗色下等于没有底色，
+  // 而字色又是继承来的近白色，于是下拉文字看着像在发白光。
+  assert.doesNotMatch(text, /--dsw-alias-bg-layer-4/)
+  assert.match(text, /var\(--dsw-specific-selector/)
+  assert.match(text, /var\(--dsw-alias-label-primary/)
+  // 展开的选项由浏览器自己画表面色，必须显式给底色与字色，不能靠继承。
+  assert.match(text, /\[data-comfy-mini\] option/)
+  assert.match(text, /\[data-comfy-select\] option/)
 })
 
 test('README 不许给出会装到别人包的 npm 安装命令', () => {

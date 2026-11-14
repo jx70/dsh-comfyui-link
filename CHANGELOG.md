@@ -5,7 +5,49 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-14
+
+### 修复
+
+- **暗色模式下绘图控件的文字看不清（发白、糊在底上）**。两个原因叠在一起：
+  - 底色用了一个主题里根本不存在的 token：`--dsw-alias-bg-layer-4`。`@deepseek-ai/dsh-client-ui-theme` 的浅色块与深色块各 119 个 token 里都没有它（整个 `@deepseek-ai` 安装目录也搜不到定义），于是每次取值都落到兜底 `rgba(128,128,128,.12)` —— 12% 灰的半透明层，压在暗色卡片的 `#2c2c2e` 上几乎等于没有底色。现在换成 `--dsw-specific-selector`（浅色 `#f5f6f7`、深色 `#353638`，不透明，出厂输入框按钮用的就是它）。
+  - 文字颜色靠 `color:inherit`，而原生 `<select>` 展开的 `<option>` 列表由浏览器自己决定表面色，我们没给任何规则 —— 继承来的近白色（`--dsw-alias-label-primary` 暗色 = `#f9fafb`）落到浅色弹层上就是「发白光」。现在 6 处 `inherit` 全改成显式 `var(--dsw-alias-label-primary, inherit)`，并给 `[data-comfy-mini] option` / `[data-comfy-select] option` 补上显式底色与字色。
+- 边框兜底色从 `rgba(255,255,255,.14)` / `.18` 改成中性 `rgba(128,128,128,.28)` / `.35`（真机上 token 有定义，这只影响兜底，浅色下不会再有白边发脏）。
+
+### 测试
+
+- `test/config.test.mjs` 26 → **27** 条：新增守护「不许再出现 `--dsw-alias-bg-layer-4`」「必须用 `--dsw-specific-selector` 与 `--dsw-alias-label-primary`」「`option` 必须有显式规则」。
+- 单测总数 89 → **90**。
+- `scripts/probe-client-bundle.mjs` 标记 18 → **19** 项（新增 `optionSkin`）。
+
+## [1.5.0] - 2026-11-14
+
+### 新增
+
+- **生图模型下拉认 `checkpoints` 里的整合包**：之前 `draw-models` 路由只发 `diffusion_models`，所以 `models/checkpoints` 里的整包（Illustrious / 光辉 这类 SDXL 检查点）在对话栏里根本选不到，`comfy_run` 也只会走 `UNETLoader + CLIPLoader + VAELoader` 三件套。现在：
+  - `GET /api/comfyui/draw-models` 的 `folders` 多一个 `checkpoints` 字段。
+  - 下拉分两组显示（「扩散模型（三件套）」与「整合包（光辉 / SDXL 检查点）」），`draw.unet` 存的仍是文件名本身。
+  - `resolveModels()` 按名字落在哪个文件夹决定加载方式：`checkpoints` 里 → 返回 `{checkpoint}`，走 `CheckpointLoaderSimple`（一个文件带出 MODEL/CLIP/VAE）；`diffusion_models` 里 → 返回 `{unet, clip, vae}`，走三件套。同名时按整合包算。
+  - 不点名时的顺序：`diffusion_models` 第一个 → `checkpoints` 第一个 → 报错。
+  - `buildTxt2Img` / `buildImg2Img` 各加一条整合包分支（节点号整体不同：整合包的 txt2img 是 1 `CheckpointLoaderSimple` / 2-3 `CLIPTextEncode` / 4 `EmptyLatentImage` / 5 `KSampler` / 6 `VAEDecode` / 7 `SaveImage` / 8 `LoraLoader`；img2img 是 1 `CheckpointLoaderSimple` / 2-3 提示词 / 4 `LoadImage` / 5 `VAEEncode` / 6 `KSampler` / 7 `VAEDecode` / 8 `SaveImage`）。
+  - `comfy_run` 的结果摘要按实际加载器读节点号（整合包报「模型：<文件>（整合包，MODEL/CLIP/VAE 都从它出）」），不再写死 `graph[1].unet_name`。
+
 ### 变更
+
+- `comfy_models` 的提示：`checkpoints` 非空时说明「模板优先用 `diffusion_models`，空了才用整合包」；两条都空才提示改用 graph 模式。
+- 系统提示与工具参数描述里「扩散模型（unet）」统一改成「生图模型」，并写明模型列表的两组分别对应哪种加载器。
+- `draw.unet` 的 schema 描述改成「diffusion_models 或 checkpoints 里的文件名」。
+
+### 测试
+
+- `test/graph.test.mjs` 22 → **27** 条：新增整合包的 `resolveModels`（点名 / 不点名 / 只有 checkpoints 时不再要求 text_encoders 与 vae）、`buildTxt2Img` 整合包分支（7 节点、连线指向 `['1',0]`/`['1',1]`/`['1',2]`）、整合包 + LoRA（节点 8）、`buildImg2Img` 整合包分支（节点号与字符串连线）。
+- `test/config.test.mjs` 新增一条：`client.js` 必须有两组分组的文案键（`drawGroupUnet` / `drawGroupCheckpoint`）且读 `folders.checkpoints`，`index.js` 必须把 `checkpoints` 发出去。
+- 单测总数 83 → **89**。
+- `scripts/probe-client-bundle.mjs` 标记 16 → **18** 项（新增 `drawCheckpoints` / `drawUnets`）。
+- `scripts/probe-http.mjs` 的 draw 段多列一行 `checkpoints`。
+- 真机验证（512×512 / 12 步）：整合包单独出图成功（`_tmp_ckpt_00001_.png`），整合包 + LoRA（`belle_anima_v1.safetensors`）也成功（`_tmp_ckpt_lora_00001_.png`），两次 `status_str` 都是 `success`。
+
+### 变更（CI）
 
 - **CI 的 Linux 镜像钉成 `ubuntu-24.04`**（原来是 `ubuntu-latest`）。`ubuntu-latest` 会在 2026-10-19 迁到 Ubuntu 26，届时 runner 上的 Node / glibc / 预装工具都可能跟着变，而这条仓库的 Linux 任务只是跑单测与 `npm pack --dry-run`，没有必须追最新的理由。钉住版本让「换镜像」变成我们自己决定的一次提交，而不是某次 push 突然变红；要升级就改 `.github/workflows/ci.yml` 的 `matrix.os` 那一行（那里有注释说明）。Windows 侧仍用 `windows-latest`。
 

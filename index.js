@@ -56,7 +56,7 @@ export const Config = z.object({
   img2img: z.object({ enabled: z.boolean().default(false).description('开启图生图（comfy_run mode="img2img"）') }).volatile(),
   upscale: z.object({ enabled: z.boolean().default(false).description('开启算法放大（comfy_upscale）') }).volatile(),
   draw: z.object({
-    unet: z.string().default('').description('默认生图模型（diffusion_models 里的文件名）；留空用文件夹里第一个'),
+    unet: z.string().default('').description('默认生图模型（diffusion_models 或 checkpoints 里的文件名）；留空用 diffusion_models 里第一个，没有就用 checkpoints 里第一个'),
     lora: z.boolean().default(false).description('允许 comfy_run / comfy_review 挂 LoRA'),
   }).volatile(),
   output: z.object({
@@ -829,7 +829,8 @@ export function apply(ctx, config) {
   ctx.tools.register({
     name: 'comfy_models',
     description:
-      '列出 ComfyUI 里装了哪些模型文件。内置文生图模板会自动用每个文件夹里的第一个；'
+      '列出 ComfyUI 里装了哪些模型文件。内置文生图模板会自动用 diffusion_models 里的第一个；'
+      + 'diffusion_models 是空的话就用 checkpoints 里的整合包（Illustrious / 光辉 这类，一个文件带 MODEL/CLIP/VAE）。'
       + '要换模型就把这里的文件名传给 comfy_run 的 unet / clip / vae。',
     parameters: params({}),
     output: output(),
@@ -849,8 +850,11 @@ export function apply(ctx, config) {
         if (list.length > 40) lines.push(`  …还有 ${list.length - 40} 个`)
       }
       const missing = ['diffusion_models', 'text_encoders', 'vae'].filter((f) => (index[f] ?? []).length === 0)
-      if (missing.length > 0) {
-        lines.push(`注意：${missing.join('、')} 是空的，内置模板跑不了（它要这三样）——改用 comfy_run 的 graph 模式传自己的工作流。`)
+      const hasCheckpoint = (index.checkpoints ?? []).length > 0
+      if (hasCheckpoint) {
+        lines.push('内置模板会优先用 diffusion_models 里的第一个（三件套）；diffusion_models 空的话就用 checkpoints 里的整合包。')
+      } else if (missing.length > 0) {
+        lines.push(`注意：${missing.join('、')} 是空的，内置模板跑不了（它要这三样，或者一个 checkpoints 整合包）——改用 comfy_run 的 graph 模式传自己的工作流。`)
       }
       return { text: lines.join('\n') }
     },
@@ -945,7 +949,7 @@ export function apply(ctx, config) {
       seed: i('随机种子，默认随机。想复现同一张图就传同一个值'),
       sampler: s('采样器，默认 euler；可选值查 comfy_node KSampler'),
       scheduler: s('调度器，默认 simple；可选值查 comfy_node KSampler'),
-      unet: s('扩散模型文件名；省略则用对话栏左侧选中的生图模型（还没选就用 diffusion_models 里第一个）'),
+      unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包（如 Illustrious-XL-v2.0.safetensors）。省略则用对话栏左侧选中的那个'),
       clip: s('文本编码器文件名，省略用 text_encoders 里第一个'),
       vae: s('VAE 文件名，省略用 vae 里第一个'),
       lora: s('LoRA 文件名（template 模式）。要先在对话栏左侧把 LoRA 开关打开；文件名用 comfy_models 查 loras 文件夹'),
@@ -1002,9 +1006,7 @@ export function apply(ctx, config) {
           const { bytes } = await fetchImageRef(args.image_prompt_id, signal)
           const imageName = await uploadImage(bytes, `dsh_src_${args.image_prompt_id.slice(0, 8)}.png`)
           graph = buildImg2Img({
-            unet: models.unet,
-            clip: models.clip,
-            vae: models.vae,
+            ...models,
             imageName,
             prompt: args.prompt,
             negative: args.negative ?? DEFAULT_NEGATIVE,
@@ -1018,9 +1020,7 @@ export function apply(ctx, config) {
           })
         } else {
           graph = buildTxt2Img({
-            unet: models.unet,
-            clip: models.clip,
-            vae: models.vae,
+            ...models,
             prompt: args.prompt,
             negative: args.negative ?? DEFAULT_NEGATIVE,
             width: args.width ?? 1024,
@@ -1057,19 +1057,27 @@ export function apply(ctx, config) {
         `队列号 ${submitted.number ?? '?'} · ${summary.count} 个节点：${byClass}`,
       ]
       if (mode === 'template' || mode === 'img2img') {
-        const loader = graph[1]?.inputs ?? {}
-        lines.push(`模型：${loader.unet_name} + ${graph[2]?.inputs?.clip_name} + ${graph[3]?.inputs?.vae_name}`)
+        // 整合包和「三件套」的节点号不同，摘要按实际加载器读，别写死
+        const head = graph[1]?.inputs ?? {}
+        if (head.ckpt_name) {
+          lines.push(`模型：${head.ckpt_name}（整合包，MODEL/CLIP/VAE 都从它出）`)
+        } else {
+          lines.push(`模型：${head.unet_name} + ${graph[2]?.inputs?.clip_name} + ${graph[3]?.inputs?.vae_name}`)
+        }
+        const isCkpt = Boolean(head.ckpt_name)
+        const samplerNode = (isCkpt
+          ? (mode === 'img2img' ? graph[6] : graph[5])
+          : (mode === 'img2img' ? graph[8] : graph[7]))?.inputs ?? {}
         if (mode === 'img2img') {
-          const samplerNode = graph[8]?.inputs ?? {}
           lines.push(`img2img · denoise ${samplerNode.denoise} · ${samplerNode.steps} 步 · seed ${samplerNode.seed}`)
         } else {
-          const latent = graph[6]?.inputs ?? {}
-          const samplerNode = graph[7]?.inputs ?? {}
+          const latent = (isCkpt ? graph[4] : graph[6])?.inputs ?? {}
           lines.push(
             `${latent.width}×${latent.height} ×${latent.batch_size} · ${samplerNode.steps} 步 · CFG ${samplerNode.cfg}`
             + ` · ${samplerNode.sampler_name}/${samplerNode.scheduler} · seed ${samplerNode.seed}`,
           )
-          if (graph[10]) lines.push(`LoRA：${graph[10]?.inputs?.lora_name}`)
+          const loraNode = isCkpt ? graph[8] : graph[10]
+          if (loraNode) lines.push(`LoRA：${loraNode?.inputs?.lora_name}`)
         }
       } else if (injectedNode !== null) {
         lines.push(`提示词写进了节点 ${injectedNode}`)
@@ -1357,9 +1365,7 @@ export function apply(ctx, config) {
         const index = await client.modelIndex({ signal })
         const models = resolveModels(index, { unet: features.draw.unet || undefined })
         const graph = buildTxt2Img({
-          unet: models.unet,
-          clip: models.clip,
-          vae: models.vae,
+          ...models,
           prompt: newPrompt,
           negative: DEFAULT_NEGATIVE,
           width: size.width,
@@ -1501,6 +1507,7 @@ export function apply(ctx, config) {
               ok: true,
               folders: {
                 diffusion_models: index.diffusion_models ?? [],
+                checkpoints: index.checkpoints ?? [],
                 text_encoders: index.text_encoders ?? [],
                 vae: index.vae ?? [],
                 loras: index.loras ?? [],
@@ -1575,7 +1582,9 @@ export function apply(ctx, config) {
               '# ComfyUI',
               `本机 ComfyUI 在 ${where()}。出图流程：comfy_run 提交（拿 prompt_id）→ comfy_result 等它跑完并取图。`,
               '文生图直接用 comfy_run 的 template 模式写 prompt；要更复杂的图先 comfy_node 查节点再走 graph 模式。',
-              '「绘图模式」的会话里，输入框左侧有绘图控件：默认扩散模型（unet）与 LoRA 开关都在那里选，' +
+              '「绘图模式」的会话里，输入框左侧有绘图控件：默认生图模型与 LoRA 开关都在那里选，' +
+                '模型列表分两组 —— 扩散模型（diffusion_models，三件套加载器）和整合包（checkpoints，' +
+                '像 Illustrious / 光辉 这类 SDXL 检查点，一个文件就带 MODEL/CLIP/VAE）。' +
                 'unet 省略时就用那边选中的模型；LoRA 没开就别传 lora。别的模式没有这两个控件，要指定模型就显式传 unet，LoRA 用不了。',
               'img2img：comfy_run mode="img2img" + image_prompt_id（底图）+ denoise 做重绘（先在图生图开关里打开）。',
               'comfy_review：让审图模型看一张图判断是否满足要求、不满意自动重画（设置页开启 review 并指定模型）。',
