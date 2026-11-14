@@ -15,6 +15,7 @@ import {
   collectImages, createClient, humanDuration, injectPrompt, normalizeGraph,
   resolveModels, summarizeGraph,
 } from '../lib/comfy.mjs'
+import { preferModel } from '../index.js'
 
 const MODELS = { unet: 'unet.safetensors', clip: 'clip.safetensors', vae: 'vae.safetensors' }
 
@@ -246,6 +247,18 @@ test('resolveModels 点名了就必须存在，否则把可选清单报出来', 
     () => resolveModels({ diffusion_models: [], checkpoints: [], text_encoders: ['t1'], vae: ['v1'] }),
     (error) => error instanceof ComfyError && /一个模型都没有/.test(error.message),
   )
+})
+
+test('preferModel：对话栏选的模型优先，unet 参数只在「自动」时兜底', () => {
+  // 用户在对话栏点了 anima，模型却顺手传了光辉 —— 必须是对话栏那个赢
+  assert.equal(preferModel('anima-base-v1.0.safetensors', 'Illustrious-XL-v2.0.safetensors'), 'anima-base-v1.0.safetensors')
+  // 对话栏停在「自动」（空串）时，unet 参数才生效
+  assert.equal(preferModel('', 'Illustrious-XL-v2.0.safetensors'), 'Illustrious-XL-v2.0.safetensors')
+  // 都没指定 → undefined，交给 resolveModels 走「文件夹里第一个」
+  assert.equal(preferModel('', ''), undefined)
+  assert.equal(preferModel(undefined, undefined), undefined)
+  // 空白串当没指定
+  assert.equal(preferModel('   ', '   '), undefined)
 })
 
 test('buildTxt2Img 给 checkpoint 时只用一个 CheckpointLoaderSimple 带出三件', () => {

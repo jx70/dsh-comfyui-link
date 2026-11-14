@@ -9,7 +9,7 @@ Drive your own ComfyUI from [DeepSeek Harness](https://github.com/deepseek-ai/de
 
 > 中文说明见 [README.md](./README.md)
 
-**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Draw mode](#draw-mode) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [Configuration](#configuration) · [How it works](#how-it-works) · [Desktop](#desktop) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
+**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Draw mode](#draw-mode) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [LoRA prompt documents](#lora-prompt-documents) · [Configuration](#configuration) · [How it works](#how-it-works) · [Desktop](#desktop) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
 
 ## The problem
 
@@ -23,7 +23,7 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 
 ## Features
 
-- **Eight tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
+- **Nine tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
 - **Review loop**: after a render, the designated vision model judges it; if unsatisfied, the plugin re-renders from its suggested prompt until the result passes or the attempt limit is hit. Pass a reference image to compare character fidelity.
 - **A built-in Draw mode**: alongside Standard / Minimal / PTC / Create there is a `draw` preset whose session starts as a rendering assistant, with an image-model picker and a LoRA toggle at the left of the composer (invisible in every other mode).
 - **Draft-then-save settings**: address, review model, the img2img / upscale switches, and the image output directory are edited locally as a draft and written to the profile only when you press **Save**; no DSH restart needed once written.
@@ -31,11 +31,12 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 - **No host internals**: `lib/comfy.mjs` uses nothing but Node's built-in `fetch` and imports no `@deepseek-ai/*`, so it runs standalone (`npm run selftest` does exactly that).
 - **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
 - **One package for Web and Desktop**: the Desktop (Electron) page is served from `dsh-app://app/`, so the plugin probes for the preload bridges (`__DSH_TRANSPORT__`, `__DSH_DIRECTORY_PICKER__`) and falls back to the ordinary browser path when they are absent.
-- **Verifiable**: 90 unit tests plus 7 probe scripts, none of which need you to click anything.
+- **LoRA prompt documents**: pick a directory in the settings page, one document per LoRA. When a LoRA is attached, the matching document's prompt section is folded into `prompt` automatically and the result says which file was used. Leave the directory empty and not a single file is read.
+- **Verifiable**: 119 unit tests plus 7 probe scripts, none of which need you to click anything.
 
 ## Tools
 
-Eight tools become available to the model:
+Nine tools become available to the model:
 
 | Tool | What it does |
 | --- | --- |
@@ -47,6 +48,7 @@ Eight tools become available to the model:
 | `comfy_control` | Cancel a job / interrupt the running one / clear the queue / free VRAM |
 | `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity, and `save_to` to keep a copy |
 | `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image, with optional `save_to` |
+| `comfy_lora_doc` | Look inside the LoRA prompt directory: pass `lora` for the matching document (`full: true` for the whole file), omit it to list everything. It never throws — it just explains the situation |
 
 ## Draw mode
 
@@ -155,20 +157,21 @@ Settings → ComfyUI Bridge.
 
 | Group | Field | Default | Notes |
 | --- | --- | --- | --- |
-| Review | `enabled` | off | Master switch for review-and-redraw |
+| Review | `enabled` | off | Master switch for review-and-redraw (the section header carries the subtitle "Auto-check after generation and regenerate on dissatisfaction") |
 | | `provider` | empty | Review model provider; empty falls back to the current session model |
 | | `model` | empty | Review model id; empty falls back to the current session model |
 | | `maxAttempts` | 1 | Max redraws (1–5) |
 | | `extra` | empty | Extra review requirements (e.g. "the character must have silver hair") |
-| img2img | `enabled` | off | When off, `mode="img2img"` is rejected |
-| Upscale | `enabled` | off | When off, `comfy_upscale` is rejected |
+| Feature switches | `img2img.enabled` | off | When off, `mode="img2img"` is rejected |
+| | `upscale.enabled` | off | When off, `comfy_upscale` is rejected |
 | Output | `dir` | empty | Where fetched images are copied; empty keeps them only in ComfyUI own output. **No text field here** — only the **Pick** button (native folder dialog) and a **Clear** button |
+| LoRA prompts | `dir` | empty | Directory of prompt documents; empty means no file is read at all. Same **Pick** / **Clear** pair, and the row then reports "N document(s) found" |
 
 `provider` / `model` are **a single dropdown**, not free text: when the settings page opens, the browser fetches a list of vision-capable models from the host (`GET /api/comfyui/vision-models`, grouped by provider). Leaving it empty means "follow the current session model". The list is fetched once when the page opens — there is no Refresh button. The dropdown is independent of the review switch — you can inspect the available models before enabling anything.
 
 Edits stay as a local draft (the row says "unsaved changes") until you press **Save** at the bottom, which writes to the profile; no DSH restart is needed afterwards.
 
-The two feature switches are **off on purpose**: each of them adds nodes and time on the ComfyUI side. Defaults off guarantees "install and get one image", everything else is opt-in.
+The two feature switches are **off on purpose**: each of them adds nodes and time on the ComfyUI side. Defaults off guarantees "install and get one image", everything else is opt-in. img2img and Upscale are now grouped under one "Feature switches" section instead of two separate bordered blocks, and the **Save** button sticks to the bottom of the panel so it stays visible when scrolling the long form.
 
 > LoRA is not on this page: it is a per-render choice, so it lives in the composer's draw control (`draw.lora`), visible only in Draw mode.
 
@@ -190,6 +193,61 @@ The output directory (`output.dir`) has three shapes:
 - Chinese paths never travel over the child process stdout (the console code page would mangle them) — they go through a UTF-8 temp file instead.
 
 `save_to` **overrides per call**: any `comfy_result` / `comfy_review` / `comfy_upscale` that passes `save_to` uses it and ignores the settings field. Existing files are never overwritten — a `-1` / `-2` suffix is appended instead.
+
+## LoRA prompt documents
+
+Many character LoRAs ship with their own notes — trigger words, outfits, palette. Drop those documents into one directory and pick it under **LoRA prompts → Prompt directory**: **whenever a LoRA is attached, the plugin reads the directory and picks the document that best fits that LoRA, folding its prompt section into `prompt`**.
+
+| What you do | What happens |
+| --- | --- |
+| `comfy_run` with `lora` | Read every document → score them → take the best one → append its prompt section to `prompt` → the result text says "prompt document: xxx.md (picked by content…; merged into prompt, +123 chars)" |
+| `comfy_run` with `mode="graph"` and a `LoraLoader` in the workflow | Same — every `LoraLoader` / `LoraLoaderModelOnly` node is scanned, its `lora_name` looked up, and a hit is written into the positive `CLIPTextEncode`. No `lora` argument needed |
+| `comfy_review` with `lora` | Same; the redraw keeps the section too, so the second round does not lose the character setup |
+| pass `lora_doc: "off"` | Skip it for this one call only — the result then says "passed `lora_doc:"off"`, skipped the document" |
+| leave the directory empty | **Not a single file is read** — identical to the behaviour before this feature existed; but with a LoRA attached the result still says "no LoRA prompt directory configured, so no document was read" |
+
+**Attaching a LoRA always leaves a trace**: hit, miss, directory not configured, or skipped by `off` — all four end up as one line in the result text, so you never have to guess whether it looked.
+
+**How it picks**: the directory may mix anything (character notes, style notes, tag lists, even the model files themselves) and file names need not match the LoRA — every recognised document is read and scored:
+
+| Signal | Points |
+| --- | --- |
+| The document sits in the **same folder as the LoRA's model file** (and that folder has only this one model) | +120 |
+| Same folder, but other models sit alongside it | +60 |
+| File name equals the LoRA name | +100 |
+| File name contains the LoRA name | +70 |
+| Subfolder name equals the LoRA name | +70 |
+| File name hits some words of the LoRA name | ratio × 60 |
+| Body mentions the LoRA name (spaces, underscores and hyphens flattened) | +30 (partial hits × 12) |
+| Title equals / contains the LoRA name | +35 / +25 |
+| Has a `Prompt` / `提示词` heading | +20 |
+| Content itself is a comma-separated tag list | +12 |
+
+**Sharing a folder is the strongest signal**: many people make one folder per character and put the LoRA file and the prompt document side by side (`铃/belle_anima_v1.safetensors` + `铃/绝区零 铃.txt`) — then the names don't matter at all. But if one folder holds several LoRAs (a whole series sharing one note), sharing a folder only counts as half the evidence and the body or title still has to name the LoRA.
+
+Three outcomes:
+
+- **match**: best score ≥ 45 — the placement, name or body really points at this LoRA; use it.
+- **sole**: nothing scores high enough, but exactly **one** document looks like a prompt — use it and say "it does not name this LoRA" in the result.
+- **none**: nothing looks like a prompt — **merge nothing**. Better to feed less than to stuff prose into `prompt`.
+
+Only `.md` / `.markdown` / `.txt`; up to 3 levels of subfolders (grouping by character or style works, and folder names are scored too); files over 256 KB are skipped. Model files (`.safetensors` / `.ckpt` / `.pt` / `.pth` / `.bin` / `.gguf` / `.sft`) are never read as documents — they are only used to decide which LoRA a document sits next to.
+
+What goes inside one document:
+
+```markdown
+# Silver-haired character
+
+This LoRA was trained on Belle Anima v1 for SDXL.
+
+## Prompt
+
+masterpiece, 1girl, silver long hair, red eyes, black dress
+```
+
+With a `# Prompt` / `## Prompt` / `## 提示词` heading only **the section below it** is used (up to the next heading of the same or higher level); without one, the whole file is used. Anything over 1200 characters is truncated — better to feed a little less than to stuff a whole manual into the prompt.
+
+To see what the plugin actually picked, call `comfy_lora_doc`: with no arguments it lists the candidates (with their subfolder paths and which ones look like prompts); with `lora` it returns the **score table** plus the chosen document's prompt section, and `full: true` returns the whole file. The tool **never throws** — no directory, a wrong path, or no match all come back as a one-line explanation.
 
 ## Configuration
 
@@ -236,7 +294,7 @@ Redraws **keep the base image's dimensions** (rounded to a multiple of 16) — a
 Three layers with clear boundaries:
 
 - `lib/comfy.mjs` — pure HTTP client + workflow construction (`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` …), **imports nothing from `@deepseek-ai/*`**, runs standalone
-- `index.js` — the host plugin: registers 8 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and two read-only routes: `GET /api/comfyui/vision-models` (review models) and `GET /api/comfyui/draw-models` (render models and LoRAs)
+- `index.js` — the host plugin: registers 9 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and four routes: `GET /api/comfyui/vision-models` (review models), `GET /api/comfyui/draw-models` (render models and LoRAs), `GET /api/comfyui/lora-docs` (prompt documents) and `POST /api/comfyui/pick-directory` (native folder dialog)
 - `client.js` — the browser half, two pieces of UI: the "ComfyUI Bridge" page in the `settings.section` slot (draft + save) and the draw control in `conversation.input.left` (Draw mode only)
 
 `index.js` also does `import z from '@deepseek-ai/schemastery'` to declare `export const Config`, which is why `dependencies` contains that one package and nothing else at runtime.
@@ -299,7 +357,7 @@ npm run selftest              # drive lib/comfy.mjs directly against ComfyUI (re
 npm run probe:route           # fake ctx, verify the vision-model filtering
 npm run probe:http            # real HTTP: verify the route sits inside the trust fence
 npm run probe:features        # real renders: template / img2img / LoRA / upscale + switch gating
-npm run probe:bundle          # verify the client bundle the browser receives contains the new code (DrawBar / save button / three routes / two desktop bridges)
+npm run probe:bundle          # verify the client bundle the browser receives contains the new code (DrawBar / save button / four routes / two desktop bridges)
 ```
 
 The probes that talk to a live DSH (`probe:http` / `probe:bundle`) read their environment from variables and **skip (exit 0)** when it's unavailable, so they don't paint CI red:

@@ -16,7 +16,7 @@
  */
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import z from '@deepseek-ai/schemastery'
@@ -61,6 +61,9 @@ export const Config = z.object({
   }).volatile(),
   output: z.object({
     dir: z.string().default('').description('图片输出目录；绝对路径直接用，相对路径相对 ComfyUI 的 output；留空＝留在 ComfyUI 的 output'),
+  }).volatile(),
+  loraDocs: z.object({
+    dir: z.string().default('').description('LoRA 提示词文档目录；绝对路径直接用，相对路径相对 ComfyUI 的 output；留空＝不查文档'),
   }).volatile(),
 })
 
@@ -174,13 +177,15 @@ function unwrapVolatile(value) {
 /**
  * 读取当前功能开关（每次都现读 volatile 引用，热编辑即时生效）。
  * 默认：review/img2img/upscale 全关闭；draw.unet 留空（用文件夹里第一个）、draw.lora 关闭；
- * output.dir 留空（图就留在 ComfyUI 自己的 output 里，不额外复制）。
- * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}}}
+ * output.dir 留空（图就留在 ComfyUI 自己的 output 里，不额外复制）；
+ * loraDocs.dir 留空（挂 LoRA 时不去找提示词文档）。
+ * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}, loraDocs:{dir:string}}}
  */
 function readFeatureConfig(config) {
   const review = unwrapVolatile(config?.review) ?? {}
   const draw = unwrapVolatile(config?.draw) ?? {}
   const output = unwrapVolatile(config?.output) ?? {}
+  const loraDocs = unwrapVolatile(config?.loraDocs) ?? {}
   return {
     review: {
       enabled: review.enabled === true,
@@ -198,7 +203,21 @@ function readFeatureConfig(config) {
     output: {
       dir: typeof output.dir === 'string' ? output.dir.trim() : '',
     },
+    loraDocs: {
+      dir: typeof loraDocs.dir === 'string' ? loraDocs.dir.trim() : '',
+    },
   }
+}
+
+/**
+ * 生图模型优先级：对话栏里选的（draw.unet）是用户当面点的，优先级最高；
+ * 只有它留空（= 自动）时，模型通过 comfy_run 的 unet 参数临时指定的才生效。
+ * 两者都空就 undefined，交给 resolveModels 走「文件夹里第一个」。
+ */
+export function preferModel(drawUnet, argUnet) {
+  if (typeof drawUnet === 'string' && drawUnet.trim() !== '') return drawUnet
+  if (typeof argUnet === 'string' && argUnet.trim() !== '') return argUnet
+  return undefined
 }
 
 /**
@@ -248,24 +267,31 @@ export function looksAbsolute(p) {
 }
 
 /**
- * 把「配置里的输出目录」解析成最终目录。
- * - 空 → ''（不复制，图留在 ComfyUI 自己的 output 里）
+ * 把「配置里的目录」解析成最终目录。label 只用于报错文案，让用户知道是哪一栏写错了。
+ * - 空 → ''（不动作）
  * - 绝对 → 原样
  * - 相对 + 知道 ComfyUI 的 output 根 → 拼在它下面
- * - 相对 + 不知道根 → 报错（否则会把图写到进程 cwd 里，用户根本找不到）
+ * - 相对 + 不知道根 → 报错（否则会落到进程 cwd 里，用户根本找不到）
  */
-export function resolveOutputDir(configured, comfyRoot) {
+export function resolveConfiguredDir(configured, comfyRoot, label = '目录') {
   const raw = typeof configured === 'string' ? configured.trim() : ''
   if (raw.length === 0) return ''
   if (looksAbsolute(raw)) return raw
   const root = typeof comfyRoot === 'string' ? comfyRoot.trim() : ''
   if (root.length === 0) {
     throw new Error(
-      '输出目录写的是相对路径，但认不出 ComfyUI 的 output 目录在哪。'
-      + '改成绝对路径，或用 save_to 直接给绝对路径。',
+      `${label}写的是相对路径，但认不出 ComfyUI 的 output 目录在哪。`
+      + '改成绝对路径，或用参数直接给绝对路径。',
     )
   }
   return join(root.replace(/[\\/]+$/, ''), raw)
+}
+
+/**
+ * 把「配置里的输出目录」解析成最终目录（相对路径以 ComfyUI 的 output 为基准）。
+ */
+export function resolveOutputDir(configured, comfyRoot) {
+  return resolveConfiguredDir(configured, comfyRoot, '输出目录')
 }
 
 /**
@@ -303,6 +329,373 @@ export async function saveImageCopy(dir, image, bytes) {
 }
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
+
+// ── LoRA 提示词文档 ───────────────────────────────────────────────────────
+// 目录里可能什么都有：角色说明、画风笔记、随手记的 tag 清单、完全无关的东西。
+// 文件名也不保证跟 LoRA 名对得上，所以这里不靠命名约定 —— 把每篇读进来打分：
+// 「文件名像不像 + 正文提没提到这个 LoRA + 内容像不像提示词」，挑最靠谱的一篇。
+// 这一节全是纯函数 / 纯文件读取，不碰 ComfyUI，方便单测。
+
+/** 认的文档扩展名（小写比较） */
+const LORA_DOC_EXTS = new Set(['.md', '.markdown', '.txt'])
+/** 认的模型文件扩展名：用来判断「文档和 LoRA 文件放在同一个文件夹」 */
+const LORA_MODEL_EXTS = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.bin', '.gguf', '.sft'])
+/** 递归最多往下走几层，防止有人把整个盘指进来 */
+const LORA_DOC_MAX_DEPTH = 3
+/** 单篇文档超过这个字节数就跳过（提示词文档没有这么大） */
+const LORA_DOC_MAX_BYTES = 256 * 1024
+/** 并进 prompt 的提示词段最多多少字 */
+const LORA_DOC_MAX_CHARS = 1200
+/** 一次最多读多少篇来打分（目录里塞了几百篇时别把 IO 打满） */
+const LORA_DOC_SCAN_LIMIT = 120
+/** 打分阶段累计读入的字节上限，超了就只看前若干篇 */
+const LORA_DOC_SCAN_BYTES = 4 * 1024 * 1024
+/** 分数到这个数才算「确实指向这个 LoRA」，可以直接并进 prompt */
+const LORA_DOC_STRONG_SCORE = 45
+
+/** 这些扩展名一定是文件后缀，对齐前先剥掉（模型文件的后缀普遍超过 8 个字母） */
+const KNOWN_EXTS = new Set([
+  'safetensors', 'ckpt', 'pt', 'pth', 'bin', 'gguf', 'sft',
+  'md', 'markdown', 'txt',
+])
+
+/**
+ * 把 LoRA 名或文档名规范化成同一个 key，用来对齐。
+ * 'Belle Anima v1.safetensors' → 'belle_anima_v1'
+ * '提示词-Belle_Anima-v1.MD'   → '提示词_belle_anima_v1'
+ */
+export function normalizeLoraKey(name) {
+  const raw = typeof name === 'string' ? name : ''
+  const dot = raw.lastIndexOf('.')
+  const ext = dot > 0 ? raw.slice(dot + 1).toLowerCase() : ''
+  // 先按已知后缀剥（safetensors 有 11 个字母），再兜一个短后缀
+  const strip = dot > 0 && (KNOWN_EXTS.has(ext) || /^[A-Za-z0-9]{1,8}$/.test(ext))
+  const noExt = strip ? raw.slice(0, dot) : raw
+  return noExt
+    .trim()
+    .toLowerCase()
+    .replace(/[\s_\-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+}
+
+/**
+ * 从一篇文档里取出「提示词段」：
+ * 有 `# 提示词` / `## Prompt` 这类标题就取它下面的内容，没有就取全文。
+ * 超过 maxChars 截断并标记（宁可少喂一点，也别把整篇说明塞进 prompt）。
+ */
+export function extractPromptSection(text, { maxChars = LORA_DOC_MAX_CHARS } = {}) {
+  const raw = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
+  if (raw.trim().length === 0) return { text: '', truncated: false, heading: '' }
+  const lines = raw.split(/\r?\n/)
+  const headingRe = /^(#{1,6})\s*(prompt|positive\s*prompt|提示词|正面提示词)\s*[:：]?\s*$/i
+  let start = -1
+  let level = 0
+  let heading = ''
+  for (let index = 0; index < lines.length; index += 1) {
+    const matched = headingRe.exec(lines[index].trim())
+    if (!matched) continue
+    start = index + 1
+    level = matched[1].length
+    heading = lines[index].trim()
+    break
+  }
+  let body = ''
+  if (start < 0) {
+    body = raw
+  } else {
+    const out = []
+    for (let index = start; index < lines.length; index += 1) {
+      const line = lines[index]
+      const next = /^(#{1,6})\s+/.exec(line.trim())
+      // 遇到同级或更高级的标题就收工，子标题（更深）算正文
+      if (next && next[1].length <= level) break
+      out.push(line)
+    }
+    body = out.join('\n')
+  }
+  const trimmed = body.trim()
+  if (trimmed.length <= maxChars) return { text: trimmed, truncated: false, heading }
+  return { text: trimmed.slice(0, maxChars).trim(), truncated: true, heading }
+}
+
+/** 把名字切成词：'Belle Anima v1' → ['belle','anima','v1'] */
+export function nameTokens(name) {
+  return normalizeLoraKey(name).split('_').filter((token) => token.length > 0)
+}
+
+/** 内容像不像「逗号分隔的提示词」，而不是一大段说明文字 */
+export function looksLikePrompt(text) {
+  const body = typeof text === 'string' ? text : ''
+  const lines = body.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+  if (lines.length === 0) return false
+  const separators = (body.match(/[,，、]/g) ?? []).length
+  if (separators < 3) return false
+  // 成句的说明文字：过半的行以句号/问号/叹号收尾，那就不是 tag 串
+  const sentences = lines.filter((line) => /[。！？!?]$/.test(line)).length
+  if (sentences * 2 >= lines.length) return false
+  // tag 串的每一段都短（英文 tag 直接用整段判定）；成段叙述的每一段都长
+  const segments = body.split(/[,，、\n]/).map((item) => item.trim()).filter((item) => item.length > 0)
+  if (segments.length === 0) return false
+  const tagLike = segments.filter((item) => /^[\x20-\x7E]+$/.test(item) || item.length <= 6).length
+  return tagLike * 10 >= segments.length * 6
+}
+
+/** 文档的第一行标题（没有 `#` 就用第一行非空行）—— 角色说明通常把它当标题写 */
+export function docTitle(text) {
+  const body = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
+  for (const line of body.split(/\r?\n/)) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    return trimmed.replace(/^#{1,6}\s*/, '').trim()
+  }
+  return ''
+}
+
+/**
+ * 给一篇文档打分：这个 LoRA 该不该用它。
+ * 分数只用于排序与「够不够格」判断，各项权重都集中在这里，改起来一目了然。
+ * 注意文件名只是「一个信号」，不再是门槛 —— 名字完全不对、正文里提到了也照样能挑中。
+ * @returns {{score:number, reasons:string[], section:{text:string,truncated:boolean,heading:string},
+ *   promptish:boolean, hasPromptHeading:boolean, title:string}}
+ */
+export function scoreDocForLora(doc, text, loraName) {
+  const reasons = []
+  let score = 0
+  const raw = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
+  const section = extractPromptSection(raw)
+  const hasPromptHeading = section.heading.length > 0
+  const title = docTitle(raw)
+  const loraKey = normalizeLoraKey(loraName)
+  const loraTokens = nameTokens(loraName)
+  const stemKey = typeof doc?.key === 'string' && doc.key.length > 0
+    ? doc.key
+    : normalizeLoraKey(doc?.stem ?? doc?.name ?? '')
+  const stemTokens = stemKey.split('_').filter((token) => token.length > 0)
+  // 子目录名也算文件名信号的一部分：`belle_anima_v1/角色.md` 与 `belle_anima_v1.md` 同等对待
+  const relKey = typeof doc?.rel === 'string' && doc.rel.length > 0
+    ? normalizeLoraKey(doc.rel.replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[\\/]/g, ' '))
+    : stemKey
+
+  if (loraKey.length > 0) {
+    // ⓪ 摆放：文档和这个 LoRA 的模型文件在同一个文件夹里 —— 最硬的配对证据。
+    //    「一个角色一个文件夹、模型与提示词并排放」是常见整理习惯，名字怎么起都不影响判断。
+    const siblings = Array.isArray(doc?.siblings) ? doc.siblings : []
+    if (siblings.includes(loraKey)) {
+      const oneToOne = siblings.length === 1
+      score += oneToOne ? 120 : 60
+      reasons.push(oneToOne ? '和这个 LoRA 摆在同一个文件夹' : '所在文件夹里有这个 LoRA（文件夹里还有别的模型）')
+    }
+    // ① 文件名（含子目录名）：完全一致 > 互相包含 > 命中几个词
+    //    互相包含只在短的那边够长时才算 —— 否则名字叫「a.md」的文档会因为含字母 a 就白拿 70 分
+    const shorter = stemKey.length <= loraKey.length ? stemKey : loraKey
+    const longer = stemKey.length <= loraKey.length ? loraKey : stemKey
+    const relHit = relKey.length >= 3 && relKey !== stemKey && relKey.includes(loraKey)
+    if (stemKey === loraKey) {
+      score += 100
+      reasons.push('文件名与 LoRA 名一致')
+    } else if (shorter.length >= 3 && longer.includes(shorter)) {
+      score += 70
+      reasons.push('文件名包含 LoRA 名')
+    } else if (relHit) {
+      score += 70
+      reasons.push('所在文件夹名与 LoRA 名一致')
+    } else if (loraTokens.length > 0) {
+      const hit = loraTokens.filter((token) => stemTokens.includes(token)).length
+      if (hit > 0) {
+        score += Math.round(60 * (hit / loraTokens.length))
+        reasons.push(`文件名命中 ${hit}/${loraTokens.length} 个词`)
+      }
+    }
+    // ② 正文：把空格/下划线/连字符抹平后找 LoRA 名（"Belle Anima v1" 也能命中）
+    const flat = raw.toLowerCase().replace(/[\s_\-]+/g, '_')
+    if (flat.includes(loraKey)) {
+      score += 30
+      reasons.push('正文提到 LoRA 名')
+    } else if (loraTokens.length > 0) {
+      const hit = loraTokens.filter((token) => flat.includes(token)).length
+      if (hit > 0) {
+        score += Math.round(12 * (hit / loraTokens.length))
+        reasons.push(`正文命中 ${hit}/${loraTokens.length} 个词`)
+      }
+    }
+    // ③ 标题：角色说明最常把 LoRA 名写在第一行
+    const titleKey = normalizeLoraKey(title)
+    if (titleKey.length > 0) {
+      if (titleKey === loraKey) {
+        score += 35
+        reasons.push('标题就是 LoRA 名')
+      } else if (titleKey.includes(loraKey)) {
+        score += 25
+        reasons.push('标题包含 LoRA 名')
+      }
+    }
+  }
+
+  // ④ 形态：有「提示词」小标题、或者内容本来就是逗号分隔的 tag
+  if (hasPromptHeading) {
+    score += 20
+    reasons.push('有「提示词」小标题')
+  }
+  const promptish = looksLikePrompt(section.text.length > 0 ? section.text : raw)
+  if (promptish) {
+    score += 12
+    reasons.push('内容像提示词')
+  }
+
+  return { score, reasons, section, promptish, hasPromptHeading, title }
+}
+
+/**
+ * 逐篇读入候选文档并打分，按分数从高到低排（同分按文件名，结果可复现）。
+ * 读不了的文件进 skipped，不抛。受 LORA_DOC_SCAN_LIMIT / LORA_DOC_SCAN_BYTES 约束。
+ */
+export async function rankLoraDocs(docs, loraName, options = {}) {
+  const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : LORA_DOC_SCAN_LIMIT
+  const budget = Number.isInteger(options.budget) && options.budget > 0 ? options.budget : LORA_DOC_SCAN_BYTES
+  const list = Array.isArray(docs) ? docs : []
+  const candidates = []
+  const skipped = []
+  let scanned = 0
+  let spent = 0
+  for (const doc of list) {
+    if (scanned >= limit || spent >= budget) break
+    let raw = ''
+    try {
+      raw = await readFile(doc.file, 'utf8')
+    } catch (error) {
+      skipped.push(`${doc?.name ?? doc?.file ?? '?'}：${error?.code ?? error?.message ?? error}`)
+      continue
+    }
+    scanned += 1
+    spent += Buffer.byteLength(raw, 'utf8')
+    candidates.push({ doc, ...scoreDocForLora(doc, raw, loraName), raw })
+  }
+  candidates.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score
+    return String(a.doc?.name ?? '').localeCompare(String(b.doc?.name ?? ''))
+  })
+  return { candidates, scanned, total: list.length, skipped }
+}
+
+/**
+ * 在排好序的候选里挑一篇。
+ *   match → 分数够高：名字/正文/标题确实指向这个 LoRA
+ *   sole  → 没有够高的，但全目录只有一篇像提示词文档，那就用它（并在结果里说明）
+ *   none  → 都不像，什么都不并 —— 宁可少喂，也别把说明文字塞进 prompt
+ */
+export function chooseLoraDoc(ranked) {
+  const list = Array.isArray(ranked) ? ranked : []
+  const strong = list.find((item) => item.score >= LORA_DOC_STRONG_SCORE)
+  if (strong) return { chosen: strong, mode: 'match' }
+  const qualifying = list.filter((item) => (
+    item.hasPromptHeading === true || item.promptish === true || item.score >= 20
+  ))
+  if (qualifying.length === 1) return { chosen: qualifying[0], mode: 'sole' }
+  return { chosen: null, mode: 'none' }
+}
+
+/**
+ * 扫目录里的提示词文档 —— 子文件夹也要走进去（角色文档常按角色/画风分子目录放）。
+ * 目录不存在 / 读不了都不抛，返回 { ok:false, error }。
+ * 自己走目录（不用 readdir 的 recursive）：深度、排序、循环保护都要可控，结果才可复现。
+ */
+export async function readLoraDocs(dir) {
+  const root = typeof dir === 'string' ? dir.trim() : ''
+  if (root.length === 0) return { ok: true, dir: '', docs: [] }
+  const docs = []
+  const skipped = []
+  // 记下走过的真实路径：符号链接/联接点指回上层时别原地打转
+  const seen = new Set()
+  const walk = async (current, depth, rel) => {
+    let entries
+    try {
+      entries = await readdir(current, { withFileTypes: true })
+    } catch (error) {
+      if (depth === 0) throw error
+      skipped.push(`${current}：${error?.code ?? error?.message ?? error}`)
+      return
+    }
+    const ordered = entries.slice().sort((a, b) => a.name.localeCompare(b.name))
+    // 先扫一遍这一层的文件，记下「同目录里有哪些模型文件」—— 一个角色一个文件夹、
+    // 模型与文档并排放，是最硬的配对证据，比任何名字相似度都可靠。
+    const modelsHere = []
+    for (const entry of ordered) {
+      const dot = entry.name.lastIndexOf('.')
+      const ext = dot > 0 ? entry.name.slice(dot).toLowerCase() : ''
+      if (!LORA_MODEL_EXTS.has(ext)) continue
+      modelsHere.push(normalizeLoraKey(entry.name))
+    }
+    for (const entry of ordered) {
+      const full = join(current, entry.name)
+      let isDir = entry.isDirectory()
+      // Windows 的目录联接 / 符号链接：Dirent 只说「是个链接」，得 stat 一次才知道指向哪
+      if (!isDir && entry.isSymbolicLink()) {
+        try {
+          isDir = (await stat(full)).isDirectory()
+        } catch {
+          isDir = false
+        }
+      }
+      if (isDir) {
+        if (depth + 1 > LORA_DOC_MAX_DEPTH) continue
+        let real = full
+        try {
+          real = await realpath(full)
+        } catch {
+          real = full
+        }
+        if (seen.has(real)) continue
+        seen.add(real)
+        await walk(full, depth + 1, rel.length === 0 ? entry.name : `${rel}/${entry.name}`)
+        continue
+      }
+      if (!entry.isFile() && !entry.isSymbolicLink()) continue
+      const dot = entry.name.lastIndexOf('.')
+      const ext = dot > 0 ? entry.name.slice(dot).toLowerCase() : ''
+      if (!LORA_DOC_EXTS.has(ext)) continue
+      let info
+      try {
+        info = await stat(full)
+      } catch {
+        continue
+      }
+      if (info.size > LORA_DOC_MAX_BYTES) {
+        skipped.push(`${entry.name}：${info.size} 字节，超过 ${LORA_DOC_MAX_BYTES}`)
+        continue
+      }
+      const stem = dot > 0 ? entry.name.slice(0, dot) : entry.name
+      const docKey = normalizeLoraKey(stem)
+      docs.push({
+        file: full,
+        name: entry.name,
+        stem,
+        key: docKey,
+        rel: rel.length === 0 ? entry.name : `${rel}/${entry.name}`,
+        // 同目录里有哪些模型（key 形式）—— 用来判断「这篇文档是不是就跟这个 LoRA 摆在一起」
+        siblings: modelsHere.filter((key) => key !== docKey),
+        size: info.size,
+      })
+    }
+  }
+  try {
+    await walk(root, 0, '')
+  } catch (error) {
+    const missing = error?.code === 'ENOENT'
+    return { ok: false, dir: root, docs: [], error: missing ? '目录不存在' : (error?.message ?? String(error)) }
+  }
+  return { ok: true, dir: root, docs, skipped }
+}
+
+/**
+ * 把文档里的提示词段并进用户的 prompt。空文档原样返回（一个字符都不改）。
+ */
+export function composeLoraPrompt(prompt, docText) {
+  const base = typeof prompt === 'string' ? prompt : ''
+  const extra = typeof docText === 'string' ? docText.trim() : ''
+  if (extra.length === 0) return base
+  if (base.trim().length === 0) return extra
+  return `${base.trim()}\n\n${extra}`
+}
 
 // ── 原生文件夹选择框 ──────────────────────────────────────────────────────
 // 这一节全部是纯函数（除了 pickDirectory），方便单测在不弹窗的前提下覆盖。
@@ -505,6 +898,9 @@ const VISION_ROUTE = '/api/comfyui/vision-models'
 /** 路由路径：GET /api/comfyui/draw-models（对话栏「生图模型」下拉的数据源） */
 const DRAW_ROUTE = '/api/comfyui/draw-models'
 
+/** 路由路径：GET /api/comfyui/lora-docs（设置页显示「已识别 N 篇」） */
+const LORA_DOCS_ROUTE = '/api/comfyui/lora-docs'
+
 // ── 唯一一条会「等用户点按钮」的路由 ──────────────────────────────────────
 // 设置页的「选择」按钮要弹的是**系统原生**文件夹选择框，而原生对话框只能开在
 // 交互式会话里（宿主的 node 进程自己没有桌面），所以这里 spawn 一个
@@ -590,6 +986,99 @@ export function apply(ctx, config) {
       }
     }
     return derivedRoot
+  }
+
+  // ── LoRA 提示词文档：查一次、并进 prompt、报告结果 ──────────────────────
+  // 关键约定：设置里没选目录时**一个文件都不读**，行为与没有这个功能时完全一致。
+
+  /** 设置里配的文档目录；相对路径以 ComfyUI 的 output 为基准。没配返回 ''。 */
+  async function resolvedLoraDocDir(signal) {
+    const configured = readFeatureConfig(config).loraDocs.dir
+    if (configured.length === 0) return ''
+    return resolveConfiguredDir(configured, await resolvedOutputRoot(signal), 'LoRA 提示词目录')
+  }
+
+  /**
+   * 给某个 LoRA 挑提示词文档：读目录 → 逐篇打分 → 排序 → 选一篇。
+   * 返回 { configured, dir, mode, doc, score, reasons, ranked, count, promptish, scanned, text,
+   *        truncated, heading, error, skipped }：
+   *   configured=false → 设置里没选目录，调用方什么都不用做（一个文件都没读）
+   *   mode='none'      → 都不像，doc 为 null，ranked 里是前几名（给人看为什么没挑中）
+   */
+  async function lookupLoraDoc(loraName, signal) {
+    const dir = await resolvedLoraDocDir(signal)
+    if (dir.length === 0) {
+      return {
+        configured: false, dir: '', mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
+        count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '', error: '', skipped: [],
+      }
+    }
+    const listed = await readLoraDocs(dir)
+    if (listed.ok !== true) {
+      return {
+        configured: true, dir, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
+        count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '',
+        error: listed.error ?? '读不了目录', skipped: listed.skipped ?? [],
+      }
+    }
+    const docs = listed.docs ?? []
+    const ranked = await rankLoraDocs(docs, loraName)
+    const { chosen, mode } = chooseLoraDoc(ranked.candidates)
+    const promptish = ranked.candidates.filter((item) => item.promptish || item.hasPromptHeading).length
+    const top = ranked.candidates.slice(0, 5).map((item) => ({
+      name: item.doc?.name ?? '', score: item.score, reasons: item.reasons,
+    }))
+    const skipped = [...(listed.skipped ?? []), ...ranked.skipped]
+    if (!chosen) {
+      return {
+        configured: true, dir, mode: 'none', doc: null, score: 0, reasons: [], ranked: top,
+        count: docs.length, promptish, scanned: ranked.scanned, text: '', truncated: false,
+        heading: '', error: '', skipped,
+      }
+    }
+    const section = chosen.section ?? extractPromptSection('')
+    return {
+      configured: true, dir, mode, doc: chosen.doc, score: chosen.score, reasons: chosen.reasons,
+      ranked: top, count: docs.length, promptish, scanned: ranked.scanned,
+      text: section.text, truncated: section.truncated === true, heading: section.heading ?? '',
+      error: '', skipped,
+    }
+  }
+
+  /** 把挑中的文档并进 prompt，并把结果写成给人看的一行（没有就返回空串） */
+  function applyLoraDoc(lookup) {
+    if (!lookup.configured) {
+      return { prompt: '', note: '提示词文档：挂了 LoRA，但设置里没配「LoRA 提示词」目录，这次没查文档。' }
+    }
+    if (lookup.error) return { prompt: '', note: `提示词文档：${lookup.error}` }
+    const why = Array.isArray(lookup.reasons) && lookup.reasons.length > 0
+      ? `（${lookup.reasons.join('、')}）`
+      : ''
+    if (!lookup.doc) {
+      if (lookup.count === 0) {
+        return { prompt: '', note: `提示词文档：目录里没有文档（${lookup.dir}）` }
+      }
+      const near = (lookup.ranked ?? [])
+        .slice(0, 3)
+        .map((item) => `${item.name}(${item.score})`)
+        .join('、')
+      return {
+        prompt: '',
+        note: `提示词文档：${lookup.count} 篇候选里没有像这个 LoRA 的提示词文档，这次没并入`
+          + `（其中 ${lookup.promptish} 篇像提示词）${near ? `；分数最高的几篇：${near}` : ''}`
+          + '。想自己看一眼用 comfy_lora_doc。',
+      }
+    }
+    if (lookup.text.length === 0) {
+      return { prompt: '', note: `提示词文档：${lookup.doc.name} 里没有可用的提示词段${why}` }
+    }
+    const prefix = lookup.mode === 'sole'
+      ? `提示词文档：${lookup.doc.name}（目录里唯一像提示词的那篇，没明确提到这个 LoRA${why}；已并入 prompt，`
+      : `提示词文档：${lookup.doc.name}（按内容挑中${why}；已并入 prompt，`
+    return {
+      prompt: lookup.text,
+      note: `${prefix}+${lookup.text.length} 字${lookup.truncated ? '，原文更长已截断' : ''}）`,
+    }
   }
 
   // ── 审图核心：取图 / 定模型 / 问模型 / 提交并等结果 ─────────────────────
@@ -932,7 +1421,7 @@ export function apply(ctx, config) {
     description:
       '把一张工作流提交给 ComfyUI 排队，立刻返回 prompt_id。三种用法：\n'
       + '· mode="template"（默认）：内置文生图 —— 加载模型 → 正负提示词 → 采样 → 解码 → 存图。'
-      + '只要写 prompt；unet 省略时用对话栏左侧选的生图模型，也可以在对话栏打开 LoRA 后传 lora / lora_strength。\n'
+      + '只要写 prompt；生图模型用对话栏左侧选的那个（选「自动」时可用 unet 参数临时指定），也可以在对话栏打开 LoRA 后传 lora / lora_strength。\n'
       + '· mode="img2img"：基于一张已有图重绘（先在设置页开启）。给 image_prompt_id（之前出图的 prompt_id），'
       + 'denoise 控制改动幅度（越小越贴近原图）。\n'
       + '· mode="graph"：传自己的 API 格式工作流 { "节点id": { class_type, inputs } }。\n'
@@ -949,11 +1438,16 @@ export function apply(ctx, config) {
       seed: i('随机种子，默认随机。想复现同一张图就传同一个值'),
       sampler: s('采样器，默认 euler；可选值查 comfy_node KSampler'),
       scheduler: s('调度器，默认 simple；可选值查 comfy_node KSampler'),
-      unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包（如 Illustrious-XL-v2.0.safetensors）。省略则用对话栏左侧选中的那个'),
+      unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包。注意：对话栏左侧选中的模型优先，这里传的 unet 只在那边选的是「自动」时才生效；想临时换模型请让用户在对话栏里改'),
       clip: s('文本编码器文件名，省略用 text_encoders 里第一个'),
       vae: s('VAE 文件名，省略用 vae 里第一个'),
       lora: s('LoRA 文件名（template 模式）。要先在对话栏左侧把 LoRA 开关打开；文件名用 comfy_models 查 loras 文件夹'),
       lora_strength: n('LoRA 强度，默认 0.8'),
+      lora_doc: {
+        type: 'string',
+        enum: ['auto', 'off'],
+        description: 'auto（默认）= 挂 LoRA 时读设置里的「LoRA 提示词」目录，按内容挑最像这个 LoRA 的那篇，把提示词段并进 prompt；off = 这次不查（设置里没选目录时本来就什么都不读）',
+      },
       image_prompt_id: s('img2img 模式的底图来源：之前出图的 prompt_id'),
       denoise: n('img2img 的 denoise，默认 0.6。越小越贴近原图，越大改得越狠'),
       graph: { type: 'object', additionalProperties: true, description: 'mode=graph 的工作流：{ "1": { class_type, inputs } }' },
@@ -967,6 +1461,8 @@ export function apply(ctx, config) {
       const features = readFeatureConfig(config)
       let graph
       let injectedNode = null
+      // 挂 LoRA 时提示词文档的结论，最后拼进结果文本（没查就留空）
+      let loraDocNote = ''
 
       if (mode === 'graph') {
         if (!args.graph) throw new Error('mode="graph" 时必须给 graph（API 格式的节点表）')
@@ -975,6 +1471,41 @@ export function apply(ctx, config) {
           injectedNode = injectPrompt(graph, args.prompt, args.prompt_node)
           if (injectedNode === null) {
             throw new Error('提示词没写进去：这张图里没有 CLIPTextEncode 节点，请用 prompt_node 指定节点 id')
+          }
+        }
+        // graph 模式同样兑现「挂了 LoRA 就一定看文档」：扫节点表，凡是有 LoraLoader /
+        // LoraLoaderModelOnly 的，按它带的 lora_name 查文档，命中就并进正面提示词。
+        // 正面提示词优先写进 args.prompt 用过的那个节点，否则退回第一个 CLIPTextEncode。
+        const loraNames = []
+        const loraSeen = new Set()
+        for (const node of Object.values(graph)) {
+          const ct = node?.class_type
+          if (ct !== 'LoraLoader' && ct !== 'LoraLoaderModelOnly') continue
+          const name = node?.inputs?.lora_name
+          if (typeof name === 'string' && name.trim() !== '' && !loraSeen.has(name)) {
+            loraSeen.add(name)
+            loraNames.push(name)
+          }
+        }
+        if (loraNames.length > 0) {
+          if ((args.lora_doc ?? 'auto') === 'off') {
+            loraDocNote = '提示词文档：这次传了 lora_doc:"off"，跳过了文档。'
+          } else {
+            const notes = []
+            for (const loraName of loraNames) {
+              const lookup = await lookupLoraDoc(loraName, signal)
+              const applied = applyLoraDoc(lookup)
+              if (applied.prompt.length > 0) {
+                const target = injectedNode
+                  ?? Object.entries(graph).find(([, n]) => n.class_type === 'CLIPTextEncode')?.[0]
+                if (target) {
+                  const node = graph[target]
+                  node.inputs = { ...node.inputs, text: composeLoraPrompt(node.inputs?.text ?? '', applied.prompt) }
+                }
+              }
+              if (applied.note) notes.push(applied.note)
+            }
+            loraDocNote = notes.length > 0 ? notes.join('\n') : ''
           }
         }
       } else if (mode === 'template' || mode === 'img2img') {
@@ -995,9 +1526,25 @@ export function apply(ctx, config) {
           throw new Error('LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
         }
 
+        // 挂 LoRA 时先看一遍提示词文档（纯本地读文件，不联网），
+        // 所以放在 modelIndex 之前 —— 服务没跑也能先把文档读出来。
+        // 设置里没选目录时 lookupLoraDoc 一个文件都不读，但结果里会交代「没查」。
+        if (args.lora) {
+          if ((args.lora_doc ?? 'auto') === 'off') {
+            loraDocNote = '提示词文档：这次传了 lora_doc:"off"，跳过了文档。'
+          } else {
+            const lookup = await lookupLoraDoc(args.lora, signal)
+            const applied = applyLoraDoc(lookup)
+            loraDocNote = applied.note
+            if (applied.prompt.length > 0) {
+              args = { ...args, prompt: composeLoraPrompt(args.prompt, applied.prompt) }
+            }
+          }
+        }
+
         const index = await client.modelIndex({ signal })
         const models = resolveModels(index, {
-          unet: args.unet || features.draw.unet || undefined,
+          unet: preferModel(features.draw.unet, args.unet),
           clip: args.clip,
           vae: args.vae,
         })
@@ -1082,6 +1629,8 @@ export function apply(ctx, config) {
       } else if (injectedNode !== null) {
         lines.push(`提示词写进了节点 ${injectedNode}`)
       }
+      // 挂 LoRA 时把文档那笔账交代清楚：命中了哪篇 / 没命中 / 目录没配
+      if (loraDocNote) lines.push(loraDocNote)
       lines.push('')
       lines.push(`输出目录：${
         features.output.dir
@@ -1300,6 +1849,11 @@ export function apply(ctx, config) {
       max_attempts: i('最多重生成几次（不含首次），省略用设置页里的值'),
       lora: s('重画时挂的角色 LoRA 文件名（要先在输入框左侧的绘图控件里把 LoRA 打开）。留空则不带 LoRA'),
       lora_strength: n('LoRA 强度，默认 0.8'),
+      lora_doc: {
+        type: 'string',
+        enum: ['auto', 'off'],
+        description: 'auto（默认）= 挂 LoRA 时按内容挑出「LoRA 提示词」目录里最像这个 LoRA 的那篇，把提示词段并进重画提示词；off = 这次不查',
+      },
       save_to: s('把最终那张图另存到这个目录（会自己建目录）。省略就用设置页配的输出目录；两边都空就不额外复制'),
     }, ['prompt_id', 'requirement']),
     output: output(),
@@ -1333,6 +1887,19 @@ export function apply(ctx, config) {
       if (lora && !features.draw.lora) {
         throw new Error('LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
       }
+      // 挂 LoRA 就先把提示词文档看一遍（设置里没选目录时一个文件都不读，但结果会交代）
+      let loraDocNote = ''
+      let loraDocPrompt = ''
+      if (lora) {
+        if ((args.lora_doc ?? 'auto') === 'off') {
+          loraDocNote = '提示词文档：这次传了 lora_doc:"off"，跳过了文档。'
+        } else {
+          const lookup = await lookupLoraDoc(lora, signal)
+          const applied = applyLoraDoc(lookup)
+          loraDocNote = applied.note
+          loraDocPrompt = applied.prompt
+        }
+      }
       const reviewLog = []
 
       let satisfied = false
@@ -1362,11 +1929,13 @@ export function apply(ctx, config) {
         const newPrompt = verdict.newPrompt && verdict.newPrompt.trim().length > 0
           ? verdict.newPrompt
           : `${args.requirement}${verdict.feedback ? `（修正：${verdict.feedback}）` : ''}`
+        // 重画时也把 LoRA 文档的提示词段带上，否则第二轮就丢了角色设定
+        const drawPrompt = composeLoraPrompt(newPrompt, loraDocPrompt)
         const index = await client.modelIndex({ signal })
         const models = resolveModels(index, { unet: features.draw.unet || undefined })
         const graph = buildTxt2Img({
           ...models,
-          prompt: newPrompt,
+          prompt: drawPrompt,
           negative: DEFAULT_NEGATIVE,
           width: size.width,
           height: size.height,
@@ -1388,6 +1957,7 @@ export function apply(ctx, config) {
         `结论：${satisfied ? '满意' : '仍未满意'}`,
       ]
       if (referenceRef) lines.push('已附角色参考图，审图时一并比对角色还原度。')
+      if (loraDocNote) lines.push(loraDocNote)
       lines.push('')
       for (const item of reviewLog) {
         lines.push(`第 ${item.attempt} 轮：${item.satisfied ? '✓ 满意' : '✗ 不满意'} · 评分 ${item.score}/10`)
@@ -1460,6 +2030,122 @@ export function apply(ctx, config) {
     },
   })
 
+  // ── 9. comfy_lora_doc ──────────────────────────────────────────────────
+  ctx.tools.register({
+    name: 'comfy_lora_doc',
+    description:
+      '查「LoRA 提示词」目录里的文档。目录里可以混放各种文档，文件名也不必与 LoRA 名对齐 —— '
+      + '给 lora 就按内容打分（文件名像不像、正文提没提到、内容像不像提示词）挑最像的那篇并给出打分表；'
+      + '不给 lora 就列出目录里的候选。'
+      + '目录在插件设置页里选；没选目录、目录不存在、挑不中、读不了都只是说明情况，不会报错。'
+      + 'comfy_run / comfy_review 挂 LoRA 时会自动做同样的事并把提示词段并进 prompt，'
+      + '这个工具是用来「先看一眼」或者看全文的。',
+    parameters: params({
+      lora: s('LoRA 文件名（如 belle_anima_v1.safetensors）。省略则列出目录里的候选文档'),
+      full: { type: 'boolean', description: 'true 时返回挑中那篇的全文（不截断），默认只给提示词段' },
+    }, []),
+    output: output(),
+    isConcurrencySafe: () => true,
+    async execute(args) {
+      const features = readFeatureConfig(config)
+      const dir = features.loraDocs.dir
+      if (dir.length === 0) {
+        return {
+          text: '还没指定 LoRA 提示词目录。到插件设置页的「LoRA 提示词」那一栏点「选择」挑一个目录，'
+            + '把提示词文档（以及别的说明、笔记都行）放进去；文件名不必与 LoRA 名对齐，'
+            + '挂 LoRA 出图时会按内容自己挑。',
+        }
+      }
+      let resolved
+      try {
+        resolved = resolveConfiguredDir(dir, await resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs)), 'LoRA 提示词目录')
+      } catch (error) {
+        return { text: `LoRA 提示词目录用不了：${error?.message ?? error}` }
+      }
+      const listed = await readLoraDocs(resolved)
+      if (listed.ok !== true) {
+        return { text: `LoRA 提示词目录读不了（${resolved}）：${listed.error ?? '未知原因'}` }
+      }
+      const docs = listed.docs ?? []
+      const skipped = [...(listed.skipped ?? [])]
+      const lora = typeof args.lora === 'string' ? args.lora.trim() : ''
+      if (lora.length === 0) {
+        if (docs.length === 0) {
+          return { text: `目录里没有可用的文档：${resolved}\n认的扩展名是 .md / .markdown / .txt，最多往下走 ${LORA_DOC_MAX_DEPTH} 层。` }
+        }
+        // 没给 lora 时也把「像不像提示词」标出来：这条只看内容，跟名字无关
+        const lines = [`LoRA 提示词目录：${resolved}`, `共 ${docs.length} 篇候选（含子文件夹）：`]
+        for (const doc of docs) {
+          let promptish = false
+          try {
+            const raw = await readFile(doc.file, 'utf8')
+            const section = extractPromptSection(raw)
+            promptish = looksLikePrompt(section.text.length > 0 ? section.text : raw)
+          } catch {
+            promptish = false
+          }
+          const where = doc.rel && doc.rel !== doc.name ? `（${doc.rel}）` : ''
+          lines.push(`  ${doc.name}${where}，${doc.size} 字节${promptish ? ' ✓ 像提示词' : ''}`)
+        }
+        if (skipped.length > 0) {
+          lines.push('', '跳过的：')
+          for (const item of skipped) lines.push(`  ${item}`)
+        }
+        lines.push('', '挂 LoRA 出图时会按内容挑一篇并并进 prompt；想指定看哪篇，把 lora 传进来。')
+        return { text: lines.join('\n') }
+      }
+      const ranked = await rankLoraDocs(docs, lora)
+      skipped.push(...ranked.skipped)
+      const { chosen, mode } = chooseLoraDoc(ranked.candidates)
+      const table = []
+      if (ranked.candidates.length > 0) {
+        table.push('打分（前 5）：')
+        for (const item of ranked.candidates.slice(0, 5)) {
+          const why = item.reasons.length > 0 ? ` · ${item.reasons.join('、')}` : ''
+          table.push(`  ${item.score.toString().padStart(3, ' ')}  ${item.doc?.name ?? ''}${why}`)
+        }
+      }
+      if (!chosen) {
+        return {
+          text: [`没挑到与「${lora}」相配的提示词文档（${ranked.scanned}/${ranked.total} 篇参与打分，门槛 ${LORA_DOC_STRONG_SCORE} 分）。`,
+            ...table,
+            '',
+            '这时 comfy_run / comfy_review 什么都不并入。要么把 LoRA 名写进文档正文或标题，',
+            '要么把提示词单独写成一串逗号分隔的 tag（这样的文档更容易被认出来）。'].join('\n'),
+        }
+      }
+      let raw = ''
+      try {
+        raw = await readFile(chosen.doc.file, 'utf8')
+      } catch (error) {
+        return { text: `读不了 ${chosen.doc.name}：${error?.code ?? error?.message ?? error}` }
+      }
+      if (args.full === true) {
+        return {
+          text: [`挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
+            ...table,
+            '',
+            raw.replace(/^\uFEFF/, '').trim()].join('\n'),
+        }
+      }
+      const section = chosen.section
+      if (section.text.length === 0) {
+        return { text: `${chosen.doc.name} 里没有可用的提示词内容（整篇都是空白）。` }
+      }
+      return {
+        text: [
+          `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
+          ...table,
+          '',
+          section.heading ? `取的段落：${section.heading}` : '取的段落：全文（没找到「提示词 / Prompt」小标题）',
+          `字数：${section.text.length}${section.truncated ? '（原文更长，已截断）' : ''}`,
+          '',
+          section.text,
+        ].join('\n'),
+      }
+    },
+  })
+
   // ── 只读路由：设置页的审图模型清单 + 对话栏的生图模型清单 ──────────────
   // 浏览器半端没有 llm 服务、也没有 comfy 客户端（client 侧只有
   // slots/locale/configForms 等），所以这两份清单必须由宿主开只读路由给它取。
@@ -1521,6 +2207,56 @@ export function apply(ctx, config) {
       }), 'comfyui: /api/comfyui/draw-models 路由')
     } catch (error) {
       log(`生图模型路由没挂上：${error?.message ?? error}`)
+    }
+    // ── LoRA 提示词目录清单（只读，只报「识别到几篇 / 其中几篇像提示词」）────
+    // 设置页用它在路径下面显示「已识别 N 篇候选（M 篇像提示词）」，让人立刻确认路径选对了。
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: LORA_DOCS_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async () => {
+          const configured = readFeatureConfig(config).loraDocs.dir
+          if (configured.length === 0) {
+            return jsonResponse({ ok: true, dir: '', count: 0, promptish: 0, docs: [] })
+          }
+          try {
+            const dir = resolveConfiguredDir(
+              configured,
+              await resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs)),
+              'LoRA 提示词目录',
+            )
+            const listed = await readLoraDocs(dir)
+            if (listed.ok !== true) {
+              return jsonResponse({
+                ok: false, dir, error: listed.error ?? '读不了目录', count: 0, promptish: 0, docs: [],
+              }, 502)
+            }
+            // 顺手标出「像提示词」的篇数：只读前 LORA_DOC_SCAN_LIMIT 篇，别把 IO 打满
+            const docs = []
+            let promptish = 0
+            for (const doc of (listed.docs ?? []).slice(0, LORA_DOC_SCAN_LIMIT)) {
+              let like = false
+              try {
+                const raw = await readFile(doc.file, 'utf8')
+                const section = extractPromptSection(raw)
+                like = looksLikePrompt(section.text.length > 0 ? section.text : raw)
+              } catch {
+                like = false
+              }
+              if (like) promptish += 1
+              docs.push({ name: doc.name, stem: doc.stem, key: doc.key, rel: doc.rel ?? doc.name, promptish: like })
+            }
+            return jsonResponse({ ok: true, dir, count: docs.length, promptish, docs })
+          } catch (error) {
+            return jsonResponse({
+              ok: false, dir: configured, error: explain(error), count: 0, promptish: 0, docs: [],
+            }, 502)
+          }
+        },
+      }), 'comfyui: /api/comfyui/lora-docs 路由')
+    } catch (error) {
+      log(`LoRA 提示词目录路由没挂上：${error?.message ?? error}`)
     }
     // ── 唯一一条会写、也会阻塞的路由：弹原生文件夹选择框 ────────────────
     // 它只回传「用户点了哪个目录」，不落盘；写配置仍然走设置页的「保存」。
@@ -1585,12 +2321,18 @@ export function apply(ctx, config) {
               '「绘图模式」的会话里，输入框左侧有绘图控件：默认生图模型与 LoRA 开关都在那里选，' +
                 '模型列表分两组 —— 扩散模型（diffusion_models，三件套加载器）和整合包（checkpoints，' +
                 '像 Illustrious / 光辉 这类 SDXL 检查点，一个文件就带 MODEL/CLIP/VAE）。' +
-                'unet 省略时就用那边选中的模型；LoRA 没开就别传 lora。别的模式没有这两个控件，要指定模型就显式传 unet，LoRA 用不了。',
+                '对话栏选的模型优先；只有它停在「自动」时，comfy_run 的 unet 参数才生效。LoRA 没开就别传 lora。' +
+                '别的模式没有这两个控件，要指定模型就显式传 unet，LoRA 用不了。',
               'img2img：comfy_run mode="img2img" + image_prompt_id（底图）+ denoise 做重绘（先在图生图开关里打开）。',
               'comfy_review：让审图模型看一张图判断是否满足要求、不满意自动重画（设置页开启 review 并指定模型）。',
               '要判断「角色是否还原」时，把参考图的 prompt_id 一起传给 comfy_review 的 reference_prompt_id —— 它会把两张图一起交给审图模型比对。',
               'comfy_upscale：用算法放大一张图（放大开关在插件设置页里开）。',
               '图片落在哪：默认就是 ComfyUI 自己的 output 目录（comfy_result 会报出完整路径）；设置页的「输出目录」配了就额外复制一份过去，save_to 可以单次覆盖。那一栏只有「选择」按钮（点开是系统文件夹选择框）和一个「清除」，没有手填框。',
+              'LoRA 提示词：设置页的「LoRA 提示词」可以指定一个目录。目录里可以混放各种文档（角色说明、画风笔记、tag 清单都行），'
+                + '文件名也不必与 LoRA 名对齐 —— comfy_run / comfy_review 挂 LoRA 时会读进来按内容打分（文件名像不像、正文提没提到、'
+                + '内容像不像提示词），挑最像的那篇把提示词段并进 prompt，并在结果里说明挑中了哪篇、为什么。'
+                + '没指定目录时什么都不读。想先看一眼用 comfy_lora_doc（给 lora 看打分表与那篇的内容，不给就列候选；full:true 看全文）。'
+                + '传 lora_doc:"off" 可以只对这一次跳过。',
               '1024×1024 在消费级显卡上单张通常要几十秒到两分钟，所以 comfy_result 要带 wait_seconds（单张 120，多张按张数加）。',
               '显存吃紧时 batch 保持 1；要腾地方用 comfy_control free_vram。',
             ].join('\n'),

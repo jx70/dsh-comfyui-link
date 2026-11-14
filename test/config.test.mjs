@@ -2,7 +2,7 @@
  * config.test.mjs —— 配置 schema + 「能不能直接开源」的守护测试
  * ============================================================================
  * 前半段钉住 Config（设置页表单就是照它渲染的）：
- *   · 五个 volatile 段（review / img2img / upscale / draw / output）都在，默认值对
+ *   · 六个 volatile 段（review / img2img / upscale / draw / output / loraDocs）都在，默认值对
  *   · 旧的 lora 段已经删掉（LoRA 开关搬到对话栏了）
  *   · review.maxAttempts 的 1–5 边界
  * 后半段钉住「去本地化」这件事本身：
@@ -62,13 +62,15 @@ test('Config 给全套默认值：指向本机 8188，三个开关全关、绘�
   assert.deepEqual(unwrap(value.draw), { unet: '', lora: false })
   // 输出目录默认空：图就留在 ComfyUI 自己的 output 里，不额外复制
   assert.deepEqual(unwrap(value.output), { dir: '' })
+  // LoRA 提示词目录默认空：一个文档都不读（不选路径就完全不参考提示词）
+  assert.deepEqual(unwrap(value.loraDocs), { dir: '' })
   // 设置页里的 LoRA 分区已经删掉，配置里也不该再有独立的 lora 段
   assert.equal(value.lora, undefined)
 })
 
-test('五个功能段都是 volatile（改完即时生效）', () => {
+test('六个功能段都是 volatile（改完即时生效）', () => {
   const value = Config({})
-  for (const key of ['review', 'img2img', 'upscale', 'draw', 'output']) {
+  for (const key of ['review', 'img2img', 'upscale', 'draw', 'output', 'loraDocs']) {
     assert.equal(typeof value[key]?.get, 'function', `${key} 不是 volatile 引用对象`)
   }
   // baseUrl 是静态配置，改了要重载插件，所以它不是 volatile
@@ -82,6 +84,8 @@ test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', ()
     img2img: { enabled: true },
     upscale: { enabled: true },
     draw: { unet: 'some-model.safetensors', lora: true },
+    output: { dir: '/srv/pics' },
+    loraDocs: { dir: '/srv/lora-docs' },
   })
   assert.equal(value.baseUrl, 'http://192.168.1.9:8188')
   const review = unwrap(value.review)
@@ -90,6 +94,8 @@ test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', ()
   assert.equal(unwrap(value.img2img).enabled, true)
   assert.equal(unwrap(value.upscale).enabled, true)
   assert.deepEqual(unwrap(value.draw), { unet: 'some-model.safetensors', lora: true })
+  assert.deepEqual(unwrap(value.output), { dir: '/srv/pics' })
+  assert.deepEqual(unwrap(value.loraDocs), { dir: '/srv/lora-docs' })
 })
 
 test('profile 里残留的旧 lora 段被原样透传但不参与功能（schema 不再声明它）', () => {
@@ -275,8 +281,8 @@ test('client.js 的宿主请求走页面传输钩子，桌面端才找得到宿�
   // 桌面端的页面来源是 dsh-app://app/，相对 /api 在那里解析不到宿主
   assert.match(text, /globalThis\.__DSH_TRANSPORT__/)
   assert.match(text, /function hostFetch\(route, init\)/)
-  // 三条路由都不能直接裸调 fetch
-  assert.doesNotMatch(text, /\bfetch\((VISION_API|DRAW_API|PICK_API)\b/)
+  // 三条 GET 路由（含 LoRA 提示词目录）都不能直接裸调 fetch
+  assert.doesNotMatch(text, /\bfetch\((VISION_API|DRAW_API|LORA_DOCS_API|PICK_API)\b/)
   // 桌面端优先用 preload 的原生目录桥，取消返回 null
   assert.match(text, /globalThis\.__DSH_DIRECTORY_PICKER__/)
   assert.match(text, /function desktopPicker\(\)/)

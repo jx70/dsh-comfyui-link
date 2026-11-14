@@ -12,6 +12,7 @@
 - [volatile 字段与热生效](#volatile-字段与热生效)
 - [开关拦截](#开关拦截)
 - [输出图怎么交回模型](#输出图怎么交回模型)
+- [LoRA 提示词文档：为什么按内容打分、为什么自动并入](#lora-提示词文档为什么按内容打分为什么自动并入)
 - [失败模式与报错约定](#失败模式与报错约定)
 - [性能数字](#性能数字)
 
@@ -55,7 +56,9 @@
 
 设置页要列「能看图的模型」，这份清单在宿主里（`llm.listProviders()` / `listModels()` / `resolveModelInfo()`）。但浏览器半端拿不到 `llm` 服务，只能让 host 侧开一条只读路由。
 
-输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `checkpoints` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`。三条路由（含后面那节讲的 `POST /api/comfyui/pick-directory`）都由 `mountDataRoutes` 里各自的 `scope.effect` 注册。
+输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `checkpoints` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`。
+
+设置页里「LoRA 提示词」那一栏还要第三份：目录里认到了哪几篇候选、其中几篇像提示词（按内容打分，不看文件名对齐）。那是一次磁盘遍历 + 逐篇读文本，同样只能在宿主侧做，于是有 `/api/comfyui/lora-docs`。四条路由（含后面那节讲的 `POST /api/comfyui/pick-directory`）都由 `mountDataRoutes` 里各自的 `scope.effect` 注册。
 
 **这条路由不能用 `webServer.register`。** DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面：
 
@@ -93,6 +96,12 @@ scope.effect(() => connection.fetch.register({
   fetch: drawHandler,
 }))
 scope.effect(() => connection.fetch.register({
+  path: '/api/comfyui/lora-docs',
+  methods: ['GET'],
+  requestBody: 'buffered',
+  fetch: docsHandler,
+}))
+scope.effect(() => connection.fetch.register({
   path: '/api/comfyui/pick-directory',
   methods: ['POST'],
   requestBody: 'buffered',
@@ -104,7 +113,7 @@ scope.effect(() => connection.fetch.register({
 
 `/api/comfyui/draw-models` 与审图那条的区别：它读的是 ComfyUI 的模型列表，所以会真的打一次 `client.modelIndex()`。ComfyUI 没跑时返回 502 + `{ok:false,error,folders:{}}`，前端据此显示「读不到 ComfyUI 模型清单」，下拉退化成只剩「自动」一项 —— 不会因为 ComfyUI 掉线把整个输入框卡住。
 
-**降级路径**：没有 `connection`（旧版宿主、或者极简 ctx）时只记一行日志就返回，8 个工具照常注册。设置页的下拉框会取不到清单，退化成「跟随当前会话模型」，绘图控件的下拉也只剩「自动」，输出目录只能在 profile 的 `cordis.patch.yml` 里配。这条路径由 `test/registration.test.mjs` 里的「删掉 ctx.connection 后 routes 为空但 tools.size 仍 8」钉住。
+**降级路径**：没有 `connection`（旧版宿主、或者极简 ctx）时只记一行日志就返回，9 个工具照常注册。设置页的下拉框会取不到清单，退化成「跟随当前会话模型」，绘图控件的下拉也只剩「自动」，输出目录只能在 profile 的 `cordis.patch.yml` 里配。这条路径由 `test/registration.test.mjs` 里的「删掉 ctx.connection 后 routes 为空但 tools.size 仍 9」钉住。
 
 ## 为什么「选择目录」要开一条 POST 路由，而且它会阻塞
 
@@ -341,6 +350,43 @@ args.save_to  →  features.output.dir  →  ''（不复制）
 
 **为什么不改 ComfyUI 的 `filename_prefix` 来做重定向**：`SaveImage` 的相对前缀由 ComfyUI 自己用 `os.path.join` 拼在它的 output 下，前缀写成绝对路径时的行为属于实现的偶然结果（不同版本不一定一致），而且这条路只能把图**搬走**、没法「多存一份」。在插件侧复制既跨版本稳定，也能同时满足「ComfyUI 那边还有一份」的预期。
 
+### LoRA 提示词文档：为什么按内容打分、为什么自动并入
+
+「挂 LoRA 时必须先看一遍有没有提示词」这条要求，如果只写在系统提示里让模型自觉去做，等于没做 —— 模型没有任何可靠的「我读过了」凭据，也没法证明自己没漏。所以这里把它做成机制：
+
+```
+comfy_run / comfy_review 收到 lora
+        ↓
+features.loraDocs.dir 为空？ ── 是 ──→ 不读任何文件，行为与 1.5.1 完全一致
+        ↓ 否
+resolveConfiguredDir(dir, comfyOutputRoot, 'LoRA 提示词目录')
+        ↓
+readLoraDocs(dir) → 递归（≤3 层）列出 [{ name, rel, stem, key, size, siblings }]
+        ↓                       ↑ siblings = 同一文件夹里并排的模型文件（key 规范化后）
+rankLoraDocs(docs, lora) → 逐篇读入打分 → 按分排序（同分按文件名，结果可复现）
+        ↓
+chooseLoraDoc(ranked) → match（≥45 分）/ sole（只有一篇像提示词）/ none
+        ↓
+extractPromptSection(text) → composeLoraPrompt(prompt, section)
+        ↓
+结果文本追加一行「提示词文档：xxx.md（按内容挑中…；已并入 prompt，+N 字）」
+```
+
+四个取舍：
+
+- **放弃文件名约定，改成按内容打分**。用户的第一版需求是「一篇文档对应一个 LoRA」，但真实目录里往往混着角色说明、画风笔记、tag 清单，名字也各写各的。于是文件名从「门槛」降级成「一个信号」：一致 +100、包含 +70、命中几个词按比例 ×60，而正文提到 LoRA 名 +30、标题命中 +35/+25、有「提示词」小标题 +20、内容像 tag 串 +12。名字完全不对但正文写了「这套是 Belle Anima v1 训的」也能被挑中 —— 这才是「要自己找」的意思。互相包含这一档要求短的那边 ≥3 个字符，否则名字叫 `a.md` 的文档会因为含字母 `a` 就白拿 70 分（写测试时被抓到）。**同目录摆放是最硬的信号**：文档和 LoRA 的模型文件在同一个文件夹里 +120（该文件夹只有这一个模型）/ +60（旁边还有别的模型），排在文件名一致 +100 之前 —— 因为「一个角色一个文件夹、模型与提示词并排」是最常见的摆法，这时候名字怎么起都不该影响配对。
+- **`sole` 的跨 LoRA 风险用「透明化」处理，不用硬防**。如果全目录只有一篇像提示词文档，用它比不用更有价值（用户大概率就是只写了一篇）；但结果里会明说「没明确提到这个 LoRA」，让人一眼看出这是猜的。宁可让人知道这是猜的，也别悄悄猜。
+- **自动并入 prompt，而不是只报告「找到了」**。只报告的话，模型还得自己再读一遍、再拼一遍，多一步就多一次漏掉的机会。并入是确定性动作，且结果文本可被验证（`+N 字`、文件名、理由）。`comfy_review` 重画时也带着这段 —— 否则第一轮有角色设定、第二轮就丢了。
+- **挑不中就不并**。三档里的 `none` 是刻意留的：目录里全是散文时，把散文塞进 prompt 只会污染出图，还会让用户以为插件「读懂了」。此时只报告「N 篇候选里没有像这个 LoRA 的提示词文档」并给出前几名分数，让人自己去补一篇。
+
+**为什么子目录也要扫**：真实的整理习惯是按角色或画风分文件夹（`belle_anima_v1/角色.md`），只扫根目录会漏掉大部分文档。所以递归最多 3 层，`rel`（子目录/文件名）也参与「文件名」那一档打分 —— 文件夹名就是 LoRA 名时，里面那篇照样命中。代价是可能扫到不该扫的东西，因此有三道闸：扩展名白名单、单文件 256 KB 上限、以及**目录留空时一个文件都不读**。
+
+**为什么同目录摆放要单独当一条证据**：`readLoraDocs` 在每一层先扫一遍本层文件，把扩展名命中 `LORA_MODEL_EXTS`（`.safetensors` / `.ckpt` / `.pt` / `.pth` / `.bin` / `.gguf` / `.sft`）的模型名规范化后记成该层文档的 `siblings`。这样 `铃/belle_anima_v1.safetensors` + `铃/绝区零 铃.txt` 这种「名字毫不相干、但摆在一起」的情况也能被 `scoreDocForLora` 直接 +120 配对，不依赖正文碰巧提到 LoRA 名。模型文件本身永远不会被当成文档读，只用来建立这条配对线索。
+
+**为什么留空时一个文件都不读**：这是用户明确要求的边界（「不选择路径默认不参考提示词」），也让升级零风险 —— 没配过这一栏的人，行为与上一版逐字节一致。
+
+**剥扩展名必须走 `KNOWN_EXTS` 白名单**：`safetensors` 有 11 个字母，用「最后一个点之后 ≤8 个字母」判断会剥不掉，导致文件名匹配永远失败、全部退回通用文档（这个 bug 在写测试时被抓到）。
+
 ## 失败模式与报错约定
 
 所有 HTTP / 图构造错误统一抛 `ComfyError`，带 `code` 区分来源：
@@ -365,6 +411,6 @@ args.save_to  →  features.output.dir  →  ''（不复制）
 | `comfy_status` / `comfy_models` / `comfy_node` | 数十毫秒 |
 | 512×512 / 4 步出图 | 约 3 秒 |
 | 1024×1024 / 30 步出图 | 几十秒到两分钟 |
-| `npm test`（90 条纯单测） | 约 1 秒 |
+| `npm test`（119 条纯单测） | 约 1 秒 |
 
 所以 `comfy_result` 的 `wait_seconds` 要按尺寸给：512 给 30 就够，1024 给 120，多张按张数加。显存吃紧时 batch 保持 1，要腾地方用 `comfy_control free_vram`。

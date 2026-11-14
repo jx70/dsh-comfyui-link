@@ -5,6 +5,40 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-14
+
+### 新增
+
+- **LoRA 提示词文档**：设置页多一栏「LoRA 提示词 → 提示词目录」，挑一个目录，挂 LoRA 出图时插件自己去里面挑一篇最合适的文档，把提示词段并进 `prompt`，并在结果文本里交代挑中了哪篇、为什么、加了几个字。
+  - **不靠命名约定**：目录里可以混放各种东西（角色说明、画风笔记、tag 清单、图片，甚至模型文件本身），文件名也不必与 LoRA 名对齐。插件把认得的文档读进来**打分**：**文档和这个 LoRA 的模型文件在同一个文件夹里 +120（该文件夹只有这一个模型）/ +60（旁边还有别的模型）**—— 这是最硬的证据，一个角色一个文件夹、模型与提示词并排放的摆法名字怎么起都行；文件名与 LoRA 名一致 +100、包含 +70、所在子文件夹名一致 +70、命中几个词按比例 ×60；正文提到 LoRA 名 +30（部分命中 ×12）；标题就是/包含 +35/+25；有「提示词」小标题 +20；内容本身是逗号分隔的 tag 串 +12。
+  - 三档结论：**match**（最高分 ≥ 45，直接用）/ **sole**（都不够高、但全目录只有一篇像提示词，用它并说明没明确提到这个 LoRA）/ **none**（都不像，**什么都不并** —— 宁可少喂，也别把说明文字塞进 prompt）。
+  - 提示词段：文档里有 `# 提示词` / `## Prompt` / `## 正面提示词` 这类标题就只取它下面那一段（到同级或更高级标题为止），没有标题就取全文；超过 1200 字截断并标记。
+  - 只认 `.md` / `.markdown` / `.txt`，子文件夹最多往下走 3 层（**子目录也扫**，按角色/画风分目录放都行，文件夹名同样参与打分；符号链接指回上层时不会原地打转），单篇超过 256 KB 跳过。`.safetensors` / `.ckpt` / `.pt` / `.pth` / `.bin` / `.gguf` / `.sft` 这些模型文件不会被当成文档读，只用来判断「这篇文档和哪个 LoRA 摆在一起」。
+  - **目录留空时一个文件都不读**，行为与 1.5.1 完全一致。
+- **新工具 `comfy_lora_doc`**：给 `lora` 就返回**打分表**（前 5 名与各自理由）加上挑中那篇的提示词段（`full: true` 给全文）；不给就列出目录里的候选、子文件夹路径，并标出哪几篇像提示词。目录没配、目录不存在、挑不中、读不了都只是说明情况，**任何情况都不抛错**。
+- **`GET /api/comfyui/lora-docs`**：只读路由，给设置页报「已识别 N 篇候选（M 篇像提示词）」。没配目录时直接回 `{ok:true, dir:'', count:0, promptish:0, docs:[]}`，不去碰磁盘。
+- `comfy_run` / `comfy_review` 新增 `lora_doc` 参数（`auto` / `off`）：`auto`（默认）就是上面那套自动挑，`off` 只对这一次跳过。`comfy_review` 重画时也会把文档里的提示词段带上，否则第二轮就丢了角色设定。
+
+### 变更
+
+- 设置页新增「LoRA 提示词」分区（只读路径 + 「选择」/「清除」+ 「已识别 N 篇候选（M 篇像提示词）」），与「图片输出」那一栏同样的交互：选完只进草稿，仍要点「保存」。
+- 系统提示补一行，说明文档目录、按内容挑、`comfy_lora_doc` 与 `lora_doc: "off"` 的用法。
+- **设置页 UI 整理**：审图分区标题改成「标题 + 副标题」两行结构；「图生图」和「放大」两个各自带边框的孤儿开关合并进一个「功能开关」分区；保存条改成 sticky 吸附在面板底部，滚动长表单时按钮始终可见。
+
+### 修复
+
+- **挂了 LoRA 却偶尔不去找提示词文档**：之前只在 `comfy_run` / `comfy_review` 的 template/img2img 分支里查文档，且有三种情况**静默跳过、结果里一个字不提** —— 传了 `lora_doc: "off"`、设置里没配目录、`mode: "graph"`（哪怕图里就有 `LoraLoader`）。表现就是「同一套流程，上一张并入了提示词，这一张没并入」。现在：
+  - **graph 模式也查**：扫工作流里所有 `LoraLoader` / `LoraLoaderModelOnly` 节点，按 `lora_name` 逐个查文档，命中就把提示词段写进正面 `CLIPTextEncode`（优先 `prompt` 参数写过的那个节点，否则第一个）。不需要另外传 `lora` 参数。
+  - **四种结局都留痕**：命中 → 「已并入 prompt，+N 字」；挑不中 → 列出分数最高的几篇；目录没配 → 「没配「LoRA 提示词」目录，这次没查文档」；传了 `off` → 「这次传了 `lora_doc:"off"`，跳过了文档」。
+
+### 测试
+
+- 新增 `test/lora-docs.test.mjs`（18 条）：`normalizeLoraKey` 的各种写法、`nameTokens`、`looksLikePrompt`（tag 串 vs 散文 vs 长句列举）、`docTitle`、`extractPromptSection` 有/无标题与截断、`scoreDocForLora`（名字不对齐靠正文/标题拿高分、文件名一致分最高、散文得 0 分、部分命中词、同目录摆放是最高信号）、`readLoraDocs` 的空目录与不存在的目录与子目录与深度上限与 siblings、`rankLoraDocs` + `chooseLoraDoc` 的 match/sole/none 三档、`resolveConfiguredDir` 的自定义 label、`composeLoraPrompt` 空文档原样返回。
+- `test/config.test.mjs` 27 条不变，但覆盖面扩到第六个 volatile 段：默认值、自定义值、`loraDocs` 也在 volatile 列表里。
+- `test/registration.test.mjs` 23 → **33** 条（9 个工具、`lora-docs` 路由的四种响应含「真目录报候选数与像提示词数」、`comfy_lora_doc` 的三种说明、`comfy_lora_doc` 给 lora 时的打分表、`lora_doc` 的 enum；外加三条「挂了 LoRA 一定留痕」：没配目录、传 `off`、graph 模式带 `LoraLoader` 时真的把文档并进正面 `CLIPTextEncode` —— 后两条用 `node:http` 起一个假 ComfyUI，从它收到的 `/prompt` 请求体反查）。
+- 单测总数 90 → **119**。
+- `scripts/probe-client-bundle.mjs` 标记 19 → **25** 项（`loraDocs` / `loraDocsApi` / `loraDocsCount` / `reviewNote` / `features` / `savebar`）；`scripts/probe-http.mjs` 打四条路由（新增 `/api/comfyui/lora-docs` 的 200 与 401，并打印候选数与像提示词数）。
+
 ## [1.5.1] - 2026-11-14
 
 ### 修复

@@ -32,8 +32,10 @@ window.__ModuleLoader__.load({
     const LOCALES = {
       zh: {
         nav: 'ComfyUI 桥',
-        review: '审图（生图后自动把关）',
-        reviewEnabled: '开启「生图后审图、不满自动重画」',
+        features: '功能开关',
+        review: '审图',
+        reviewNote: '生图后自动把关，不满意就重画',
+        reviewEnabled: '开启审图',
         provider: '审图模型 provider',
         providerHint: '留空 = 回退当前会话模型。',
         model: '审图模型 id',
@@ -51,6 +53,12 @@ window.__ModuleLoader__.load({
         outputEmpty: '没选（图留在 ComfyUI 的 output）',
         outputClear: '清除',
         outputUnsupported: '这个平台没有系统文件夹选择框，输出目录在这里设不了；要改就写进 profile 的 cordis.patch.yml（output.dir）。',
+        loraDocs: 'LoRA 提示词',
+        loraDocsDir: '提示词目录',
+        loraDocsHint: '目录里可以混放各种文档（角色说明、画风笔记、tag 清单都行），文件名也不必与 LoRA 名对齐 —— 挂 LoRA 出图时会读进来按内容挑最像的那篇，把提示词段并进 prompt。留空 = 不读任何文档。',
+        loraDocsEmpty: '没选（不读提示词文档）',
+        loraDocsFound: '已识别 {n} 篇候选（{m} 篇像提示词）',
+        loraDocsReadFailed: '读不了这个目录',
         pick: '选择',
         pickHint: '弹出系统文件夹选择框挑一个目录',
         picking: '等待选择…',
@@ -81,8 +89,10 @@ window.__ModuleLoader__.load({
       },
       en: {
         nav: 'ComfyUI Bridge',
-        review: 'Review (auto-check after generation)',
-        reviewEnabled: 'Review after generating and auto-regenerate on dissatisfaction',
+        features: 'Feature switches',
+        review: 'Review',
+        reviewNote: 'Auto-check after generation and regenerate on dissatisfaction',
+        reviewEnabled: 'Enable review',
         provider: 'Review model provider',
         providerHint: 'Empty = fall back to the current session model.',
         model: 'Review model id',
@@ -100,6 +110,12 @@ window.__ModuleLoader__.load({
         outputEmpty: 'Not chosen (images stay in ComfyUI own output)',
         outputClear: 'Clear',
         outputUnsupported: 'This platform has no native folder picker, so the output directory cannot be set here; edit output.dir in the profile cordis.patch.yml instead.',
+        loraDocs: 'LoRA prompts',
+        loraDocsDir: 'Prompt directory',
+        loraDocsHint: 'The folder may mix anything (character notes, style notes, tag lists) and file names need not match the LoRA — when a LoRA is used the closest document is picked by content and its prompt section merged into the prompt. Empty = read nothing.',
+        loraDocsEmpty: 'Not chosen (no prompt documents are read)',
+        loraDocsFound: '{n} candidate(s) found ({m} look like prompts)',
+        loraDocsReadFailed: 'Cannot read this directory',
         pick: 'Pick',
         pickHint: 'Open the system folder picker',
         picking: 'Waiting…',
@@ -134,7 +150,9 @@ window.__ModuleLoader__.load({
 [data-comfy-settings]{display:flex;flex-direction:column;gap:16px;padding:2px 2px 8px;max-width:640px;}
 [data-comfy-sec]{display:flex;flex-direction:column;gap:10px;padding-bottom:14px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));}
 [data-comfy-sec]:last-child{border-bottom:0;padding-bottom:0;}
+[data-comfy-sec-head]{display:flex;flex-direction:column;gap:2px;}
 [data-comfy-h]{font-size:13px;font-weight:600;color:var(--dsw-alias-label-primary,inherit);}
+[data-comfy-sub]{font-size:11px;line-height:16px;color:var(--dsw-alias-label-tertiary,#9aa0a6);}
 [data-comfy-row]{display:flex;align-items:flex-start;gap:10px;}
 [data-comfy-grow]{flex:1;min-width:0;}
 [data-comfy-label]{font-size:13px;color:var(--dsw-alias-label-primary,inherit);}
@@ -184,6 +202,8 @@ window.__ModuleLoader__.load({
   font-family:inherit;font-size:12px;background:#3b82f6;color:#fff;transition:opacity .15s;}
 [data-comfy-btn][disabled]{opacity:.4;cursor:default;}
 [data-comfy-btn]:focus-visible{outline:2px solid #93c5fd;outline-offset:1px;}
+[data-comfy-savebar]{display:flex;align-items:center;gap:10px;padding-top:12px;
+  position:sticky;bottom:0;background:var(--dsw-specific-input-major,transparent);}
 [data-comfy-drawbar]{display:flex;align-items:center;gap:6px;min-width:0;}
 [data-comfy-mini]{max-width:190px;box-sizing:border-box;padding:4px 6px;border-radius:7px;font-size:11px;cursor:pointer;
   border:1px solid var(--dsw-alias-border-l3,rgba(128,128,128,.28));
@@ -282,6 +302,8 @@ window.__ModuleLoader__.load({
     const DRAW_API = '/api/comfyui/draw-models'
     /* 宿主侧的路由：弹系统文件夹选择框（浏览器没有原生选目录能力） */
     const PICK_API = '/api/comfyui/pick-directory'
+    /* 宿主侧的路由：LoRA 提示词目录里识别到几篇文档 */
+    const LORA_DOCS_API = '/api/comfyui/lora-docs'
 
     /**
      * 让宿主弹一个原生文件夹选择框，返回用户挑的路径。
@@ -316,6 +338,22 @@ window.__ModuleLoader__.load({
       const error = new Error(reason)
       error.reason = body?.reason ?? ''
       throw error
+    }
+
+    /**
+     * 问宿主：LoRA 提示词目录里识别到几篇候选、其中几篇像提示词。
+     * 只用来在设置页显示「已识别 N 篇候选（M 篇像提示词）」，读失败不阻塞表单。
+     */
+    async function loadLoraDocs(dir) {
+      const res = await hostFetch(LORA_DOCS_API, { credentials: 'same-origin' })
+      const body = await res.json().catch(() => null)
+      if (!body || body.ok !== true) throw new Error(body?.error || `HTTP ${res.status}`)
+      return {
+        dir: String(body.dir ?? dir ?? ''),
+        count: Number(body.count ?? 0),
+        promptish: Number(body.promptish ?? 0),
+        docs: Array.isArray(body.docs) ? body.docs : [],
+      }
     }
 
     async function loadVisionModels() {
@@ -435,6 +473,7 @@ window.__ModuleLoader__.load({
       ['img2img', 'enabled'],
       ['upscale', 'enabled'],
       ['output', 'dir'],
+      ['loraDocs', 'dir'],
     ]
 
     function readPath(source, head, leaf) {
@@ -451,8 +490,34 @@ window.__ModuleLoader__.load({
       // 选目录：picking 期间按钮变灰（宿主那边也有一把锁，双保险防连点）
       const [picking, setPicking] = React.useState(false)
       const [pickError, setPickError] = React.useState('')
+      // LoRA 提示词目录：另一个选择按钮 + 「识别到几篇」的反馈
+      const [docsPicking, setDocsPicking] = React.useState(false)
+      const [docsPickError, setDocsPickError] = React.useState('')
+      const [docsInfo, setDocsInfo] = React.useState({ status: 'idle', count: 0, promptish: 0, error: '' })
       const timer = React.useRef(null)
       React.useEffect(() => () => { if (timer.current) clearTimeout(timer.current) }, [])
+
+      // 下面两个 effect 必须在任何 return 之前 —— hooks 顺序不能随渲染分支变化
+      const docsDir = draft && Object.prototype.hasOwnProperty.call(draft, 'loraDocs.dir')
+        ? draft['loraDocs.dir']
+        : (snap?.value?.loraDocs?.dir ?? '')
+
+      /* 问宿主「这个目录里识别到几篇候选、其中几篇像提示词」；路径空就清空状态，不发请求 */
+      const refreshLoraDocs = (dir) => {
+        if (typeof dir !== 'string' || dir.length === 0) {
+          setDocsInfo({ status: 'idle', count: 0, promptish: 0, error: '' })
+          return
+        }
+        setDocsInfo((prev) => ({ ...prev, status: 'loading' }))
+        loadLoraDocs(dir).then(
+          (info) => setDocsInfo({ status: 'ready', count: info.count, promptish: info.promptish, error: '' }),
+          (err) => setDocsInfo({ status: 'error', count: 0, promptish: 0, error: err?.message ?? String(err) }),
+        )
+      }
+      // 路径一变（选目录 / 清除 / 保存成功后的快照）就重新数一遍
+      React.useEffect(() => {
+        refreshLoraDocs(docsDir)
+      }, [docsDir, status === 'saved' ? 'saved' : ''])
 
       if (!snap || snap.status === 'unavailable') {
         return h('div', { 'data-comfy-settings': '' },
@@ -486,6 +551,7 @@ window.__ModuleLoader__.load({
         img2img: { enabled: pick('img2img', 'enabled') === true },
         upscale: { enabled: pick('upscale', 'enabled') === true },
         output: { dir: pick('output', 'dir') ?? '' },
+        loraDocs: { dir: pick('loraDocs', 'dir') ?? '' },
       }
 
       const ops = []
@@ -536,6 +602,23 @@ window.__ModuleLoader__.load({
         )
       }
 
+      /* LoRA 提示词目录：同样只给「选择」，选完立刻问宿主「识别到几篇」 */
+      const chooseLoraDocsDir = () => {
+        if (disabled || docsPicking) return
+        setDocsPicking(true)
+        setDocsPickError('')
+        pickFolder(view.loraDocs.dir).then(
+          (picked) => {
+            setDocsPicking(false)
+            if (typeof picked === 'string' && picked.length > 0) set('loraDocs', 'dir', picked)
+          },
+          (err) => {
+            setDocsPicking(false)
+            setDocsPickError(err?.reason === 'unsupported' ? t('outputUnsupported') : (err?.message || t('pickFailed')))
+          },
+        )
+      }
+
       const noteText = status === 'error'
         ? `${t('saveFailed')}：${error}`
         : status === 'saving'
@@ -551,7 +634,9 @@ window.__ModuleLoader__.load({
 
         /* 审图 */
         h('div', { 'data-comfy-sec': '' },
-          h('div', { 'data-comfy-h': '' }, t('review')),
+          h('div', { 'data-comfy-sec-head': '' },
+            h('div', { 'data-comfy-h': '' }, t('review')),
+            h('div', { 'data-comfy-sub': '' }, t('reviewNote'))),
           h(ToggleRow, {
             label: t('reviewEnabled'),
             on: view.review.enabled,
@@ -579,16 +664,14 @@ window.__ModuleLoader__.load({
             onChange: (v) => set('review', 'extra', v),
           })),
 
-        /* 图生图 */
+        /* 功能开关：图生图 / 放大 */
         h('div', { 'data-comfy-sec': '' },
+          h('div', { 'data-comfy-h': '' }, t('features')),
           h(ToggleRow, {
             label: t('img2img'), note: t('img2imgHint'),
             on: view.img2img.enabled, disabled,
             onChange: (v) => set('img2img', 'enabled', v),
-          })),
-
-        /* 放大 */
-        h('div', { 'data-comfy-sec': '' },
+          }),
           h(ToggleRow, {
             label: t('upscale'), note: t('upscaleHint'),
             on: view.upscale.enabled, disabled,
@@ -627,8 +710,51 @@ window.__ModuleLoader__.load({
             ? h('div', { 'data-comfy-note': '', 'data-bad': '' }, pickError)
             : null),
 
+        /* LoRA 提示词：目录里混放什么都行，挂 LoRA 出图时按内容挑一篇并进 prompt */
+        h('div', { 'data-comfy-sec': '', 'data-comfy-lora-docs': '' },
+          h('div', { 'data-comfy-h': '' }, t('loraDocs')),
+          h('div', { 'data-comfy-row': '' },
+            h('div', { 'data-comfy-grow': '' },
+              h('div', { 'data-comfy-label': '' }, t('loraDocsDir')),
+              h('div', { 'data-comfy-note': '' }, t('loraDocsHint')),
+              h('div', {
+                'data-comfy-path': '',
+                'data-empty': view.loraDocs.dir ? undefined : '',
+                title: view.loraDocs.dir || undefined,
+              }, view.loraDocs.dir || t('loraDocsEmpty'))),
+            h('div', { 'data-comfy-actions': '' },
+              h('button', {
+                'data-comfy-pick': '',
+                type: 'button',
+                disabled: Boolean(disabled) || docsPicking,
+                title: t('pickHint'),
+                onClick: chooseLoraDocsDir,
+              }, docsPicking ? t('picking') : t('pick')),
+              view.loraDocs.dir
+                ? h('button', {
+                  'data-comfy-clear': '',
+                  type: 'button',
+                  disabled: Boolean(disabled) || docsPicking,
+                  onClick: () => { setDocsPickError(''); set('loraDocs', 'dir', '') },
+                }, t('outputClear'))
+                : null)),
+          // 路径下面立刻反馈「识别到几篇候选、其中几篇像提示词」，选错目录能当场看出来
+          docsInfo.status === 'error'
+            ? h('div', { 'data-comfy-note': '', 'data-bad': '' }, `${t('loraDocsReadFailed')}：${docsInfo.error}`)
+            : docsInfo.status === 'ready'
+              ? h('div', { 'data-comfy-note': '', 'data-comfy-doc-count': String(docsInfo.count) },
+                t('loraDocsFound')
+                  .replace('{n}', String(docsInfo.count))
+                  .replace('{m}', String(docsInfo.promptish)))
+              : docsInfo.status === 'loading'
+                ? h('div', { 'data-comfy-note': '' }, t('loading'))
+                : null,
+          docsPickError
+            ? h('div', { 'data-comfy-note': '', 'data-bad': '' }, docsPickError)
+            : null),
+
         /* 保存（攒够一批再一次写回；对话栏那两个选项不走这里） */
-        h('div', { 'data-comfy-row': '' },
+        h('div', { 'data-comfy-savebar': '' },
           h('button', {
             'data-comfy-btn': '',
             type: 'button',

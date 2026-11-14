@@ -76,6 +76,14 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
       drawUnets: res.text.includes('drawGroupUnet'),
       // 暗色下那组控件得看得清：底色换成主题里真实存在的 token，选项显式给底色与字色
       optionSkin: res.text.includes('[data-comfy-mini] option'),
+      // LoRA 提示词：设置页那一栏 + 「识别到几篇」的反馈 + 打的那条目录清单路由
+      loraDocs: res.text.includes('data-comfy-lora-docs'),
+      loraDocsApi: res.text.includes('/api/comfyui/lora-docs'),
+      loraDocsCount: res.text.includes('data-comfy-doc-count'),
+      // 设置页 UI 优化：审图分区带副标题、图生图/放大并进「功能开关」分区、保存条 sticky
+      reviewNote: res.text.includes('reviewNote'),
+      features: res.text.includes('data-comfy-sec-head') && res.text.includes('data-comfy-sub'),
+      savebar: res.text.includes('data-comfy-savebar'),
     }
     console.log(`  ${path.slice(0, 72)}…`)
     console.log(`    → ${res.status}，${res.text.length} 字节；${Object.entries(marks).map(([k, v]) => `${k}=${v}`).join(' ')}`)
@@ -84,7 +92,7 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
   }
 
   console.log(ok
-    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 三条路由 / 保存按钮 / 输出目录的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色，手填框与设置页 LoRA 都已移除'
+    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 四条路由 / 保存按钮 / 输出目录与 LoRA 提示词两栏的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色 / 设置页的分区副标题、功能开关合并与 sticky 保存条，手填框与设置页 LoRA 都已移除'
     : '\n✗ bundle 内容不是最新代码')
   process.exit(ok ? 0 : 1)
 })().catch((e) => { console.error(e); process.exit(1) })

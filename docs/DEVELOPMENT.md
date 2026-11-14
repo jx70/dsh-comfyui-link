@@ -30,7 +30,7 @@ npm install
 
 ```
 .
-├── index.js                Host 插件：8 个工具 + 系统提示 + 三条路由（两条 GET + 一条 POST）+ Config
+├── index.js                Host 插件：9 个工具 + 系统提示 + 四条路由（三条 GET + 一条 POST）+ Config
 ├── client.js               浏览器半端：设置页（settings.section）+ 绘图控件（conversation.input.left）+ 桌面端两条 preload 桥
 ├── lib/comfy.mjs           纯 HTTP 客户端 + 工作流构造（零宿主依赖）
 ├── cordis.patch.yml        静态默认配置（baseUrl）+ 「绘图模式」preset 声明
@@ -39,9 +39,10 @@ npm install
 ├── test/
 │   ├── helpers/fake-ctx.mjs  假 ctx（tools / systemPrompt / connection / llm / attachments）
 │   ├── graph.test.mjs        工作流构造与 HTTP 客户端（27 条）
-│   ├── registration.test.mjs 注册形状、开关拦截、三条路由、save_to（23 条）
+│   ├── registration.test.mjs 注册形状、开关拦截、四条路由、save_to（33 条）
 │   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥 + 整合包 + 控件配色（27 条）
 │   ├── output.test.mjs       输出目录解析、重名不覆盖、复制落盘（4 条）
+│   ├── lora-docs.test.mjs    LoRA 提示词文档的打分、三档选择、子目录扫描、深度上限与同目录摆放（18 条）
 │   └── picker.test.mjs       原生文件夹选择框的纯函数与 POST 路由（9 条）
 ├── scripts/
 │   ├── env.mjs               所有脚本的环境入口（唯一允许读环境变量的地方）
@@ -63,7 +64,7 @@ npm install
 ## 跑测试
 
 ```bash
-npm test          # 90 条纯单测，约 1 秒
+npm test          # 119 条纯单测，约 1 秒
 npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检查
 ```
 
@@ -75,6 +76,7 @@ node --test test/registration.test.mjs
 node --test test/config.test.mjs
 node --test test/output.test.mjs
 node --test test/picker.test.mjs
+node --test test/lora-docs.test.mjs
 ```
 
 ### config.test.mjs 里的「去本地化守护」
@@ -101,8 +103,8 @@ node --test test/picker.test.mjs
 | `npm run selftest` | ✓ | | | 绕开插件直接打 ComfyUI |
 | `npm run e2e` | ✓ | | | 真出图全链路（512×512 / 4 步） |
 | `npm run probe:route` | | | | 假 ctx 验「能看图的模型」筛选 |
-| `npm run probe:http` | | ✓ | ✓ | 真打路由：带 cookie 200 / 不带 401 / 不存在 404 |
-| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（19 项标记） |
+| `npm run probe:http` | | ✓ | ✓ | 真打四条路由：带 cookie 200 / 不带 401 / 不存在 404 |
+| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（25 项标记） |
 | `npm run probe:features` | ✓ | | | template / img2img / LoRA / upscale + 开关拦截 |
 
 「需要凭据」的两个探针拿不到凭据时会**跳过并 exit 0**，所以别人的机器上跑它们不会红一片。
@@ -111,7 +113,8 @@ node --test test/picker.test.mjs
 
 - **`probe-route`**：给假 `llm` 三个 provider（两个能看图、一个纯文本），断言路由只留下能看图的模型、纯文本的被剔掉；再让 `llm` 抛异常，断言返回 500。它不碰网络，纯逻辑。
 - **`probe-http`**：真起一个 `Request` 打 `DSH_BASE` 上的路由。这条探针的价值在于**证明路由真的在信任栅栏内部** —— 如果哪天误改成 `webServer.register`，带 cookie 也不会是 200，这条会立刻红。它还顺带用「GET 打 pick-directory 得 404、POST 坏 JSON 得 400、POST 不带 cookie 得 401」钉住 POST 路由的方法匹配与鉴权，全程不弹窗。
-- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 19 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`、`drawGroupUnet`、`drawGroupCheckpoint`、`[data-comfy-mini] option`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
+- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 25 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/lora-docs`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`、`data-comfy-lora-docs`、`data-comfy-doc-count`、`drawGroupUnet`、`drawGroupCheckpoint`、`[data-comfy-mini] option`、`__DSH_TRANSPORT__`、`__DSH_DIRECTORY_PICKER__`、`reviewNote`、`data-comfy-sec-head`、`data-comfy-sub`、`data-comfy-savebar`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
+- **`probe-http`**（续）：除三条原有路由外还打 `/api/comfyui/lora-docs` —— 带 cookie 200、不带 cookie 401，两者都必须成立；没配目录时正文是 `{ok:true,dir:'',count:0,promptish:0,docs:[]}`，即「一个文件都不读」这条边界在 HTTP 层也看得见；配了目录时会打印候选数、其中几篇像提示词，以及前几篇的 `rel` 路径。
 - **`probe-features`**：真出图。它会把 `index.js` import 两次（第二次带 `?off=<时间戳>` 绕开 ESM 缓存），一次全开关关着验拦截、一次开着验真跑（开的是 `draw:{unet:'',lora:true}`，即对话栏那颗胶囊的等价配置）。LoRA 段需要 `COMFY_LORA` 指定一个真实文件名，没设就跳过 —— 不能硬编码某个 LoRA 名，别人的机器上没有。
 
 ## 环境变量
@@ -233,6 +236,18 @@ function hostFetch(route, init) {
 
 - **`output.dir` 留空必须完全不动作**（不建目录、不复制）。这是「没配过这一栏的用户行为与旧版本一致」的边界，`test/output.test.mjs` 有断言钉着。
 - **别换成 `path.isAbsolute`**。它在 Windows / Linux 上对 `X:/…` 结论相反，CI 两个平台都跑，会一边绿一边红。
+
+### LoRA 提示词文档：打分链 score → rank → choose + 一条「留空就什么都不读」的边界
+
+`index.js` 导出了 `normalizeLoraKey` / `nameTokens` / `looksLikePrompt` / `docTitle` / `extractPromptSection` / `scoreDocForLora` / `readLoraDocs` / `rankLoraDocs` / `chooseLoraDoc` / `composeLoraPrompt`，`test/lora-docs.test.mjs` 直接调它们（临时目录 + 假文档，不需要 ComfyUI）。改这块时守住四条：
+
+- **`loraDocs.dir` 留空必须完全不动作**（不读目录、不扫文件）。这是用户明确的边界，`test/lora-docs.test.mjs` 的「目录留空直接返回空清单」与 `test/registration.test.mjs` 的 lora-docs 路由 200 + 空清单两条一起钉着。
+- **剥扩展名要走 `KNOWN_EXTS` 白名单**。用「最后一个点之后 ≤8 个字母」判断会漏掉 `safetensors`（11 个字母），后果是文件名这一档永远不命中 —— 这个 bug 写测试时被抓到过一次，别改回去。
+- **文件名是信号，不是门槛**。`scoreDocForLora` 的每一档都是加分项，没有任何一项是「不满足就淘汰」；`chooseLoraDoc` 才是唯一的分流点（`match` / `sole` / `none`）。想让某个信号更管用就调权重，别在 `scoreDocForLora` 里加 `return 0` 之类的短路。
+- **同目录摆放是最硬的信号**。`readLoraDocs` 在每层先扫一遍本层文件，把扩展名命中 `LORA_MODEL_EXTS` 的模型名规范化后写进该层文档的 `siblings`；`scoreDocForLora` 据此加 `+120`（该文件夹只有这一个模型）/ `+60`（旁边还有别的模型）。这一档排在文件名一致 +100 之前，因为「一个角色一个文件夹、模型与提示词并排」是最常见的摆法，名字怎么起都不该影响配对。模型文件本身永远不会被当文档读。
+- **文档读不了不抛错**。`readLoraDocs` 返回 `{ok:false, error}`，`rankLoraDocs` 把单篇读失败塞进 `skipped`，`comfy_lora_doc` 与路由都把它翻译成一句话。挂 LoRA 出图是主流程，提示词文档是附加值，不能因为目录被删了就让出图失败。
+
+递归扫描（`readLoraDocs`）有三道闸，改的时候别顺手放开：`LORA_DOC_MAX_DEPTH = 3`（防止有人把整个盘指进来）、`LORA_DOC_MAX_BYTES = 256 * 1024`（单篇上限）、`seen` 集合存 `realpath`（符号链接/联接点指回上层时不会原地打转）。子目录名会作为 `rel` 参与打分，同目录的模型文件会作为 `siblings` 参与打分 —— 这两条一起让「按角色分文件夹摆」能工作。
 
 ### img2img 的底图要先上传
 

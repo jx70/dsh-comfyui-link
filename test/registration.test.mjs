@@ -3,16 +3,21 @@
  * ============================================================================
  * 宿主对 tools.register 的入参有硬约束（字段白名单、output.schema、render 形状），
  * 违反了是运行时才炸。这里提前钉住：
- *   · 8 个工具都在，名字不重复
+ *   · 9 个工具都在，名字不重复
  *   · 每个工具的字段只用了宿主认的那几个
  *   · output.schema 是宿主能接受的最小 object schema
  *   · render 能吐 text 块，带图时吐 text + image
  *   · systemPrompt 段注册了，且文本里带服务地址
  *   · 只读路由挂在 /api/comfyui/vision-models，且能筛出「能看图」的模型
  *   · 功能开关默认全关（img2img / LoRA / upscale 会被拦）
+ *   · LoRA 提示词目录：路由报「几篇候选 / 其中几篇像提示词」，comfy_lora_doc 给打分表
  * ============================================================================
  */
 import assert from 'node:assert/strict'
+import { createServer } from 'node:http'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { createExec, createFakeCtx } from './helpers/fake-ctx.mjs'
 
@@ -20,7 +25,7 @@ const plugin = await import('../index.js')
 
 const EXPECTED_TOOLS = [
   'comfy_status', 'comfy_models', 'comfy_node', 'comfy_run',
-  'comfy_result', 'comfy_control', 'comfy_review', 'comfy_upscale',
+  'comfy_result', 'comfy_control', 'comfy_review', 'comfy_upscale', 'comfy_lora_doc',
 ]
 
 const ALLOWED_KEYS = [
@@ -34,6 +39,53 @@ function boot(config = {}) {
   return fake
 }
 
+/**
+ * 起一个假的 ComfyUI HTTP 服务，把 /models/* 与 /prompt 接住。
+ * 这样能把「挂 LoRA → 查文档 → 并入提示词 → 提交」跑到底，不用真的连本机 ComfyUI。
+ * 返回 { baseUrl, promptIds, close }。
+ */
+function startFakeComfy() {
+  const promptIds = []
+  const lists = {
+    diffusion_models: ['a.safetensors'],
+    text_encoders: ['t.safetensors'],
+    vae: ['v.safetensors'],
+    checkpoints: [],
+    loras: [],
+  }
+  const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url.startsWith('/models/')) {
+      const folder = decodeURIComponent(req.url.slice('/models/'.length))
+      const list = lists[folder] ?? []
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify(list))
+      return
+    }
+    if (req.method === 'POST' && req.url === '/prompt') {
+      let body = ''
+      req.on('data', (chunk) => { body += chunk })
+      req.on('end', () => {
+        promptIds.push(body)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ prompt_id: `fake-${promptIds.length}`, number: promptIds.length }))
+      })
+      return
+    }
+    res.writeHead(404)
+    res.end('{}')
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      resolve({
+        baseUrl: `http://127.0.0.1:${port}`,
+        promptIds,
+        close: () => new Promise((done) => server.close(done)),
+      })
+    })
+  })
+}
+
 test('插件身份：name 固定是 comfyui，inject 声明 tools 与 systemPrompt', () => {
   assert.equal(plugin.name, 'comfyui')
   assert.deepEqual(plugin.inject, ['tools', 'systemPrompt'])
@@ -43,7 +95,7 @@ test('不能有 default 导出（cordis 的 unwrapExports 会丢掉 inject）', 
   assert.equal(plugin.default, undefined)
 })
 
-test('8 个工具全部注册，名字与文档一致', () => {
+test('9 个工具全部注册，名字与文档一致', () => {
   const { tools } = boot()
   assert.deepEqual([...tools.keys()], EXPECTED_TOOLS)
 })
@@ -147,12 +199,198 @@ test('只读路由挂上 /api/comfyui/draw-models，给对话栏的生图模型�
   assert.deepEqual(body.folders, {})
 })
 
+test('只读路由挂上 /api/comfyui/lora-docs，给设置页报「识别到几篇」', async () => {
+  // 没配目录时必须立刻回 200 + 空清单：一个文件都不读，也不碰 ComfyUI
+  const { routes } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
+  const route = routes.find((r) => r.path === '/api/comfyui/lora-docs')
+  assert.ok(route, 'LoRA 提示词目录路由没注册')
+  assert.deepEqual(route.methods, ['GET'])
+  assert.equal(route.requestBody, 'buffered')
+
+  const response = await route.fetch(new Request('http://localhost/api/comfyui/lora-docs'))
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('cache-control') ?? '', /no-store/)
+  const body = await response.json()
+  assert.equal(body.ok, true)
+  assert.equal(body.dir, '')
+  assert.equal(body.count, 0)
+  assert.equal(body.promptish, 0)
+  assert.deepEqual(body.docs, [])
+})
+
+test('配了不存在的 LoRA 提示词目录时，路由给 502 + 原因，不崩栈', async () => {
+  const { routes } = boot({
+    baseUrl: 'http://127.0.0.1:1',
+    timeoutMs: 2000,
+    loraDocs: { dir: 'no-such-dir-here' },
+  })
+  const route = routes.find((r) => r.path === '/api/comfyui/lora-docs')
+  // 相对路径 + 认不出 ComfyUI 的 output → resolveConfiguredDir 抛错，这里必须接住
+  const response = await route.fetch(new Request('http://localhost/api/comfyui/lora-docs'))
+  assert.equal(response.status, 502)
+  const body = await response.json()
+  assert.equal(body.ok, false)
+  assert.equal(typeof body.error, 'string')
+  assert.equal(body.count, 0)
+  assert.equal(body.promptish, 0)
+  assert.deepEqual(body.docs, [])
+})
+
+test('配了真目录时，路由顺带报「几篇候选 / 其中几篇像提示词」', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-route-'))
+  try {
+    await writeFile(join(root, '角色笔记.md'), [
+      '# 银发角色',
+      '',
+      '这套是 Belle Anima v1 训的。',
+      '',
+      '## 提示词',
+      'masterpiece, best quality, 1girl, silver long hair',
+    ].join('\n'))
+    await writeFile(join(root, 'notes.txt'), '这里记一点杂事。\n买牛奶，修图，回消息。')
+    const { routes } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root } })
+    const route = routes.find((r) => r.path === '/api/comfyui/lora-docs')
+    const response = await route.fetch(new Request('http://localhost/api/comfyui/lora-docs'))
+    assert.equal(response.status, 200)
+    const body = await response.json()
+    assert.equal(body.ok, true)
+    assert.equal(body.count, 2)
+    // 只有「角色笔记.md」里那串 tag 像提示词；notes.txt 是散文
+    assert.equal(body.promptish, 1)
+    assert.equal(body.docs.find((doc) => doc.name === '角色笔记.md').promptish, true)
+    assert.equal(body.docs.find((doc) => doc.name === 'notes.txt').promptish, false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('comfy_lora_doc：给了 lora 就返回打分表，名字不对齐也能挑中', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-pick-'))
+  try {
+    await writeFile(join(root, '角色笔记.md'), [
+      '# 银发角色',
+      '',
+      '这套是 Belle Anima v1 训的。',
+      '',
+      '## 提示词',
+      'masterpiece, best quality, 1girl, silver long hair, red eyes',
+    ].join('\n'))
+    await writeFile(join(root, '画风随笔.txt'), '最近在试一种更冷的色调。\n画面的光比很大，阴影偏蓝。')
+    const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root } })
+    const result = await tools.get('comfy_lora_doc').execute({ lora: 'belle_anima_v1.safetensors' }, createExec())
+    // 打分表 + 挑中的那篇 + 正文里那段提示词
+    assert.match(result.text, /打分（前 5）：/)
+    assert.match(result.text, /角色笔记\.md/)
+    assert.match(result.text, /挑中：角色笔记\.md/)
+    assert.match(result.text, /按内容匹配/)
+    assert.match(result.text, /silver long hair/)
+    // 散文那篇也出现在打分表里（透明），但 0 分、不会被挑中
+    assert.match(result.text, /0\s+画风随笔\.txt/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('comfy_lora_doc：没配目录只说明怎么配，不抛错也不读文件', async () => {
+  const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
+  const result = await tools.get('comfy_lora_doc').execute({}, createExec())
+  assert.match(result.text, /还没指定 LoRA 提示词目录/)
+  assert.match(result.text, /设置页/)
+})
+
+test('comfy_lora_doc：目录读不了也只回一句说明', async () => {
+  const { tools } = boot({
+    baseUrl: 'http://127.0.0.1:1',
+    timeoutMs: 2000,
+    loraDocs: { dir: 'no-such-dir-here' },
+  })
+  const result = await tools.get('comfy_lora_doc').execute({}, createExec())
+  assert.match(result.text, /LoRA 提示词目录用不了/)
+})
+
+test('comfy_run / comfy_review 的 lora_doc 只认 auto 与 off', () => {
+  const { tools } = boot()
+  for (const name of ['comfy_run', 'comfy_review']) {
+    const schema = tools.get(name).parameters.properties.lora_doc
+    assert.ok(schema, `${name} 没有 lora_doc 参数`)
+    assert.deepEqual(schema.enum, ['auto', 'off'])
+  }
+})
+
+test('挂了 LoRA 但没配提示词目录：结果里交代「没查文档」，不再静默', async () => {
+  const server = await startFakeComfy()
+  try {
+    const { tools } = boot({ baseUrl: server.baseUrl, timeoutMs: 2000, draw: { unet: 'a.safetensors', lora: true } })
+    const result = await tools.get('comfy_run').execute(
+      { mode: 'template', prompt: 'a cat', lora: 'belle.safetensors' },
+      createExec(),
+    )
+    assert.match(result.text, /没配「LoRA 提示词」目录/)
+    assert.match(result.text, /没查文档/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('挂了 LoRA 但传 lora_doc:"off"：结果里交代「跳过了文档」', async () => {
+  const server = await startFakeComfy()
+  try {
+    const { tools } = boot({ baseUrl: server.baseUrl, timeoutMs: 2000, draw: { unet: 'a.safetensors', lora: true } })
+    const result = await tools.get('comfy_run').execute(
+      { mode: 'template', prompt: 'a cat', lora: 'belle.safetensors', lora_doc: 'off' },
+      createExec(),
+    )
+    assert.match(result.text, /lora_doc:"off"/)
+    assert.match(result.text, /跳过了文档/)
+  } finally {
+    await server.close()
+  }
+})
+
+test('graph 模式里有 LoraLoader：照样查文档并把提示词并进正面 CLIPTextEncode', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-graph-doc-'))
+  const server = await startFakeComfy()
+  try {
+    await writeFile(join(root, '铃.txt'), [
+      '这套是 Belle Anima v1 训的。',
+      '',
+      '## 提示词',
+      'masterpiece, best quality, 1girl, silver long hair',
+    ].join('\n'))
+    await writeFile(join(root, 'belle_anima_v1.safetensors'), '')
+    const { tools } = boot({
+      baseUrl: server.baseUrl,
+      timeoutMs: 2000,
+      draw: { unet: 'a.safetensors', lora: true },
+      loraDocs: { dir: root },
+    })
+    const graph = {
+      1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ckpt.safetensors' } },
+      2: { class_type: 'LoraLoader', inputs: { lora_name: 'belle_anima_v1.safetensors', model: ['1', 0], clip: ['1', 1], strength_model: 0.8, strength_clip: 0.8 } },
+      3: { class_type: 'CLIPTextEncode', inputs: { text: 'a girl', clip: ['2', 1] } },
+      4: { class_type: 'CLIPTextEncode', inputs: { text: 'lowres', clip: ['2', 1] } },
+    }
+    const result = await tools.get('comfy_run').execute({ mode: 'graph', graph }, createExec())
+    // 结果里交代命中了哪篇
+    assert.match(result.text, /铃\.txt/)
+    assert.match(result.text, /已并入/)
+    // 提交给 ComfyUI 的正面 CLIPTextEncode 真的并进了文档里的提示词
+    const submitted = JSON.parse(server.promptIds[0])
+    const positive = Object.values(submitted.prompt).find((n) => n.class_type === 'CLIPTextEncode' && n.inputs.text.includes('a girl'))
+    assert.ok(positive, '没找到正面 CLIPTextEncode 节点')
+    assert.match(positive.inputs.text, /silver long hair/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await server.close()
+  }
+})
+
 test('没有 connection 服务时安静跳过路由，不影响工具注册', () => {
   const fake = createFakeCtx()
   delete fake.ctx.connection
   plugin.apply(fake.ctx, {})
   assert.equal(fake.routes.length, 0)
-  assert.equal(fake.tools.size, 8)
+  assert.equal(fake.tools.size, 9)
 })
 
 test('默认配置下三个功能开关全关，调用会被拦并提示去设置页 / 对话栏开', async () => {
