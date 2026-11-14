@@ -5,6 +5,10 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### 变更
+
+- **CI 的 Linux 镜像钉成 `ubuntu-24.04`**（原来是 `ubuntu-latest`）。`ubuntu-latest` 会在 2026-10-19 迁到 Ubuntu 26，届时 runner 上的 Node / glibc / 预装工具都可能跟着变，而这条仓库的 Linux 任务只是跑单测与 `npm pack --dry-run`，没有必须追最新的理由。钉住版本让「换镜像」变成我们自己决定的一次提交，而不是某次 push 突然变红；要升级就改 `.github/workflows/ci.yml` 的 `matrix.os` 那一行（那里有注释说明）。Windows 侧仍用 `windows-latest`。
+
 ## [1.4.0] - 2026-11-14
 
 ### 新增

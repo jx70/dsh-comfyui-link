@@ -14,7 +14,9 @@ jobs:
       fail-fast: false
       matrix:
         # 只跑真正会有人用的组合：Linux 跑主流程，Windows 确认路径与 junction 相关逻辑没写歪。
-        os: [ubuntu-latest, windows-latest]
+        # ubuntu 钉死版本：`ubuntu-latest` 会在 2026-10-19 迁到 Ubuntu 26，钉住才能让「哪天上游
+        # 换了镜像」变成一个我们自己决定的动作，而不是某次 push 突然变红。要升级就改这一行。
+        os: [ubuntu-24.04, windows-latest]
         node: ['22', '24']
     steps:
       - uses: actions/checkout@v7

@@ -322,7 +322,7 @@ npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新�
 
 ### 贡献
 
-提 PR 之前跑一遍 `npm test` 和 `npm run smoke`——CI 就是这两条加上 `probe:route` 与 `npm pack --dry-run`，在 ubuntu / windows × node 22 / 24 上各跑一次。测试里有一组「去本地化守护」断言（不许出现作者机器的绝对路径、不许留硬件实况、不许写会装到别人包的命令），照着它的报错改就行。
+提 PR 之前跑一遍 `npm test` 和 `npm run smoke`——CI 就是这两条加上 `probe:route` 与 `npm pack --dry-run`，在 ubuntu-24.04 / windows-latest × node 22 / 24 上各跑一次（Linux 侧钉死版本号，见 [.github/workflows/ci.yml](./.github/workflows/ci.yml) 里的注释）。测试里有一组「去本地化守护」断言（不许出现作者机器的绝对路径、不许留硬件实况、不许写会装到别人包的命令），照着它的报错改就行。
 
 改代码容易踩的坑另见 [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) 的「改代码的常见坑」。
 

@@ -310,7 +310,7 @@ See [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md) for more.
 
 ### Contributing
 
-Run `npm test` and `npm run smoke` before opening a PR — CI runs those two plus `probe:route` and `npm pack --dry-run` on ubuntu / windows × node 22 / 24. The suite includes a set of "de-localisation" assertions (no absolute paths from the author's machine, no hardware specifics, no install commands that would pull somebody else's package); follow their error messages.
+Run `npm test` and `npm run smoke` before opening a PR — CI runs those two plus `probe:route` and `npm pack --dry-run` on ubuntu-24.04 / windows-latest × node 22 / 24 (the Linux image is pinned on purpose; see the comment in [.github/workflows/ci.yml](./.github/workflows/ci.yml)). The suite includes a set of "de-localisation" assertions (no absolute paths from the author's machine, no hardware specifics, no install commands that would pull somebody else's package); follow their error messages.
 
 The traps that cost real time while editing code are listed in [docs/DEVELOPMENT.md](./docs/DEVELOPMENT.md).
 
