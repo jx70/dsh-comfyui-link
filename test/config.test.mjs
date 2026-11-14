@@ -63,7 +63,8 @@ test('Config 给全套默认值：指向本机 8188，三个开关全关、绘�
   // 输出目录默认空：图就留在 ComfyUI 自己的 output 里，不额外复制
   assert.deepEqual(unwrap(value.output), { dir: '' })
   // LoRA 提示词目录默认空：一个文档都不读（不选路径就完全不参考提示词）
-  assert.deepEqual(unwrap(value.loraDocs), { dir: '' })
+  // 字数预算默认 4000：真实角色卡动辄上万字，1200 只够塞进开头一段
+  assert.deepEqual(unwrap(value.loraDocs), { dir: '', maxChars: 4000 })
   // 设置页里的 LoRA 分区已经删掉，配置里也不该再有独立的 lora 段
   assert.equal(value.lora, undefined)
 })
@@ -85,7 +86,7 @@ test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', ()
     upscale: { enabled: true },
     draw: { unet: 'some-model.safetensors', lora: true },
     output: { dir: '/srv/pics' },
-    loraDocs: { dir: '/srv/lora-docs' },
+    loraDocs: { dir: '/srv/lora-docs', maxChars: 6000 },
   })
   assert.equal(value.baseUrl, 'http://192.168.1.9:8188')
   const review = unwrap(value.review)
@@ -95,7 +96,7 @@ test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', ()
   assert.equal(unwrap(value.upscale).enabled, true)
   assert.deepEqual(unwrap(value.draw), { unet: 'some-model.safetensors', lora: true })
   assert.deepEqual(unwrap(value.output), { dir: '/srv/pics' })
-  assert.deepEqual(unwrap(value.loraDocs), { dir: '/srv/lora-docs' })
+  assert.deepEqual(unwrap(value.loraDocs), { dir: '/srv/lora-docs', maxChars: 6000 })
 })
 
 test('profile 里残留的旧 lora 段被原样透传但不参与功能（schema 不再声明它）', () => {
@@ -111,6 +112,17 @@ test('Config 拒绝越界的 review.maxAttempts（1–5）', () => {
   assert.throws(() => Config({ review: { maxAttempts: 2.5 } }), /maxAttempts/)
   assert.equal(unwrap(Config({ review: { maxAttempts: 5 } }).review).maxAttempts, 5)
   assert.equal(unwrap(Config({ review: { maxAttempts: 1 } }).review).maxAttempts, 1)
+})
+
+test('Config 拒绝越界的 loraDocs.maxChars（200–20000），设置页必须自己夹范围', () => {
+  assert.throws(() => Config({ loraDocs: { maxChars: 100 } }), /maxChars/)
+  assert.throws(() => Config({ loraDocs: { maxChars: 99999 } }), /maxChars/)
+  assert.throws(() => Config({ loraDocs: { maxChars: 3000.5 } }), /maxChars/)
+  // 手写成字符串在 schema 层就炸 —— 整个插件会加载失败，所以 readFeatureConfig 还要再夹一层
+  assert.throws(() => Config({ loraDocs: { maxChars: '3000' } }), /maxChars/)
+  assert.equal(unwrap(Config({ loraDocs: { maxChars: 200 } }).loraDocs).maxChars, 200)
+  assert.equal(unwrap(Config({ loraDocs: { maxChars: 8000 } }).loraDocs).maxChars, 8000)
+  assert.equal(unwrap(Config({ loraDocs: { maxChars: 20000 } }).loraDocs).maxChars, 20000)
 })
 
 test('DEFAULTS 是运行期的兜底值，和 Config 的默认值一致', () => {
@@ -378,6 +390,16 @@ test('设置页用卡片分块，不再用分隔线', () => {
   assert.match(sec[0], /border-radius:var\(--dsw-radius-xl/)
   assert.match(sec[0], /var\(--dsw-alias-settings-card-fill/)
   assert.match(sec[0], /var\(--dsw-alias-settings-card-stroke/)
+})
+
+test('设置页真的能改字数预算：控件、EDITABLE、夹取范围三样都得在', () => {
+  const text = read('client.js')
+  // 光在 schema 里加字段没用 —— 设置页没有控件，用户永远改不到；没有进 EDITABLE，改了也存不下去。
+  assert.match(text, /data-comfy-budget/)
+  assert.match(text, /'loraDocs',\s*'maxChars'/)
+  // 夹取范围必须是 schema 认的 200–20000，写错一个数就变成「保存时报错」。
+  assert.match(text, /min:\s*200[\s\S]{0,80}max:\s*20000/)
+  assert.match(text, /'loraDocs\.maxChars':\s*4000/)
 })
 
 test('README 不许给出会装到别人包的 npm 安装命令', () => {

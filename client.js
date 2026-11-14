@@ -61,6 +61,8 @@ window.__ModuleLoader__.load({
         loraDocsDir: '提示词目录',
         loraDocsHint: '目录里可以混放各种文档（角色说明、画风笔记、tag 清单都行），文件名也不必与 LoRA 名对齐 —— 挂 LoRA 出图时会读进来按内容挑最像的那篇，把提示词段并进 prompt。留空 = 不读任何文档。',
         loraDocsEmpty: '没选（不读提示词文档）',
+        loraDocsBudget: '字数预算',
+        loraDocsBudgetHint: '一篇文档最多并入 prompt 多少字（200–20000）。超了不硬切，优先在最后一个空行/换行/逗号处收口，余下多少字会在结果里写明。',
         loraDocsFound: '已识别 {n} 篇候选（{m} 篇像提示词）',
         loraDocsReadFailed: '读不了这个目录',
         pick: '选择',
@@ -122,6 +124,8 @@ window.__ModuleLoader__.load({
         loraDocsDir: 'Prompt directory',
         loraDocsHint: 'The folder may mix anything (character notes, style notes, tag lists) and file names need not match the LoRA — when a LoRA is used the closest document is picked by content and its prompt section merged into the prompt. Empty = read nothing.',
         loraDocsEmpty: 'Not chosen (no prompt documents are read)',
+        loraDocsBudget: 'Character budget',
+        loraDocsBudgetHint: 'How many characters of a document may be merged into the prompt (200–20000). When over, it cuts at the last blank line / newline / comma instead of mid-tag, and reports how much was left out.',
         loraDocsFound: '{n} candidate(s) found ({m} look like prompts)',
         loraDocsReadFailed: 'Cannot read this directory',
         pick: 'Pick',
@@ -287,7 +291,7 @@ window.__ModuleLoader__.load({
         h(Switch, { on, onChange, disabled }))
     }
 
-    function TextRow({ label, note, value, onChange, disabled, numeric }) {
+    function TextRow({ label, note, value, onChange, disabled, numeric, min, max }) {
       const [draft, setDraft] = React.useState(null)
       React.useEffect(() => { setDraft(null) }, [value])
       const field = h('input', {
@@ -302,7 +306,8 @@ window.__ModuleLoader__.load({
           setDraft(null)
           if (v === null) return
           if (numeric && !Number.isFinite(v)) return
-          onChange(numeric ? Math.max(1, Math.min(5, Math.round(v))) : v)
+          // 夹取范围由调用方给（maxAttempts 是 1–5，字数预算是 200–20000）
+          onChange(numeric ? Math.max(min ?? 1, Math.min(max ?? 5, Math.round(v))) : v)
         },
       })
       return h('div', { 'data-comfy-row': '' },
@@ -515,7 +520,11 @@ window.__ModuleLoader__.load({
       ['upscale', 'enabled'],
       ['output', 'dir'],
       ['loraDocs', 'dir'],
+      ['loraDocs', 'maxChars'],
     ]
+
+    /* 数字字段清空时的回退值：宿主对越界值是硬拒绝，回退必须落在 schema 的 min/max 之内 */
+    const NUM_FALLBACK = { 'review.maxAttempts': 1, 'loraDocs.maxChars': 4000 }
 
     function readPath(source, head, leaf) {
       const group = source ? source[head] : undefined
@@ -592,7 +601,7 @@ window.__ModuleLoader__.load({
         img2img: { enabled: pick('img2img', 'enabled') === true },
         upscale: { enabled: pick('upscale', 'enabled') === true },
         output: { dir: pick('output', 'dir') ?? '' },
-        loraDocs: { dir: pick('loraDocs', 'dir') ?? '' },
+        loraDocs: { dir: pick('loraDocs', 'dir') ?? '', maxChars: pick('loraDocs', 'maxChars') ?? 4000 },
       }
 
       const ops = []
@@ -602,7 +611,8 @@ window.__ModuleLoader__.load({
         if (next === prev) continue
         let value = next
         if (value === undefined || value === null) {
-          value = typeof prev === 'boolean' ? false : (typeof prev === 'number' ? 1 : '')
+          const fallback = NUM_FALLBACK[`${head}.${leaf}`]
+          value = typeof prev === 'boolean' ? false : (typeof prev === 'number' ? (fallback ?? 1) : '')
         }
         ops.push({ op: 'set', path: [head, leaf], value })
       }
@@ -791,6 +801,18 @@ window.__ModuleLoader__.load({
                   onClick: () => { setDocsPickError(''); set('loraDocs', 'dir', '') },
                 }, t('outputClear'))
                 : null)),
+          // 字数上限：文档太长时决定喂多少，配小了会砍内容，配大了可能串味
+          h('div', { 'data-comfy-row': '', 'data-comfy-budget': '' },
+            h(TextRow, {
+              label: t('loraDocsBudget'),
+              note: t('loraDocsBudgetHint'),
+              numeric: true,
+              min: 200,
+              max: 20000,
+              value: view.loraDocs.maxChars,
+              disabled,
+              onChange: (v) => set('loraDocs', 'maxChars', v),
+            })),
           // 路径下面立刻反馈「识别到几篇候选、其中几篇像提示词」，选错目录能当场看出来
           docsInfo.status === 'error'
             ? h('div', { 'data-comfy-note': '', 'data-bad': '' }, `${t('loraDocsReadFailed')}：${docsInfo.error}`)

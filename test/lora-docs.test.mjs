@@ -8,7 +8,7 @@
  *   · 目录里混着散文、图片、子目录时，只挑像提示词的那篇。
  *   · 挑不中就什么都不并（mode='none'），宁缺毋滥。
  *   · 只认 .md / .markdown / .txt，深度最多 3 层，超大文件跳过。
- *   · 提示词段：有「提示词 / Prompt」标题就只取那一段，没有就取全文；超长截断。
+ *   · 提示词段：有「提示词 / Prompt」标题就只取那一段，没有就取全文；超长按边界收口（不切半个 tag）。
  *   · 空文档并进 prompt 时一个字符都不改（否则会在 prompt 尾巴上留空白）。
  * ============================================================================
  */
@@ -25,6 +25,7 @@ import {
   looksLikePrompt,
   nameTokens,
   normalizeLoraKey,
+  promptBody,
   rankLoraDocs,
   readLoraDocs,
   resolveConfiguredDir,
@@ -117,21 +118,81 @@ test('extractPromptSection：有「提示词」标题只取那一段', () => {
   assert.doesNotMatch(section.text, /这段不该带上/)
 })
 
-test('extractPromptSection：没有标题就取全文，超长截断并标记', () => {
+test('extractPromptSection：没有标题就取全文，超长按边界收口并报出字数', () => {
   const plain = 'just a prompt, no heading at all'
-  assert.deepEqual(extractPromptSection(plain), { text: plain, truncated: false, heading: '' })
+  assert.deepEqual(extractPromptSection(plain), {
+    text: plain, truncated: false, heading: '', totalChars: plain.length, keptChars: plain.length, cut: '',
+  })
 
-  const long = 'x'.repeat(50)
-  const cut = extractPromptSection(long, { maxChars: 10 })
-  assert.equal(cut.truncated, true)
-  assert.equal(cut.text.length, 10)
-  assert.equal(cut.heading, '')
+  // 空行边界最优先
+  const blankRun = 'line one, tag, tag\n\nline two, tag, tag, tag'
+  const blankCut = extractPromptSection(blankRun, { maxChars: 20 })
+  assert.equal(blankCut.cut, 'blank')
+  assert.equal(blankCut.text, 'line one, tag, tag')
+  assert.equal(blankCut.truncated, true)
+  assert.equal(blankCut.totalChars, blankRun.length)
+  assert.equal(blankCut.keptChars, blankCut.text.length)
+
+  // 中文逗号边界、且切后不带残留分隔符、不切半个 tag
+  const tags = 'masterpiece, best quality, 1girl, silver long hair, red eyes, school uniform'
+  // 上限 30 时窗口是 "...1girl" 的半截（"1gir"），应该退到前一个逗号，绝不带半截 tag
+  const tagCut = extractPromptSection(tags, { maxChars: 30 })
+  assert.equal(tagCut.cut, 'comma')
+  assert.equal(tagCut.text, 'masterpiece, best quality')
+  assert.ok(tagCut.keptChars <= 30)
+  // 上限 33 时窗口刚好把一个完整 tag 包含进来，就把它收进来
+  const wider = extractPromptSection(tags, { maxChars: 33 })
+  assert.equal(wider.cut, 'comma')
+  assert.equal(wider.text, 'masterpiece, best quality, 1girl')
+  assert.doesNotMatch(wider.text, /[,，、;；\s]$/)
+
+  // 完全没有边界 → 硬切，并如实标出来
+  const noBoundary = 'x'.repeat(50)
+  const hardCut = extractPromptSection(noBoundary, { maxChars: 10 })
+  assert.equal(hardCut.truncated, true)
+  assert.equal(hardCut.cut, 'hard')
+  assert.equal(hardCut.keptChars, 10)
 
   // 空白 / 非字符串 → 空段，不抛
-  assert.deepEqual(extractPromptSection('   '), { text: '', truncated: false, heading: '' })
-  assert.deepEqual(extractPromptSection(undefined), { text: '', truncated: false, heading: '' })
+  const emptyShape = { truncated: false, heading: '', totalChars: 0, keptChars: 0, cut: '' }
+  assert.deepEqual(extractPromptSection('   '), { text: '', ...emptyShape })
+  assert.deepEqual(extractPromptSection(undefined), { text: '', ...emptyShape })
   // BOM 要剥掉，否则第一行标题匹配不上
   assert.equal(extractPromptSection('\uFEFF## Prompt\nhello').text, 'hello')
+})
+
+test('extractPromptSection：边界太靠前就换下一档，不把预算浪费成几个字', () => {
+  // 逗号在 4 个字处（< 60% 的下限），后面只有空格 → 应该退到空格边界
+  const text = 'aaaa, bbbb cccc dddd eeee ffff gggg'
+  const cut = extractPromptSection(text, { maxChars: 20 })
+  assert.equal(cut.cut, 'space')
+  assert.equal(cut.text, 'aaaa, bbbb cccc')
+
+  // 上限比全文大 → 不截断、cut 为空
+  const short = 'a, b, c'
+  const whole = extractPromptSection(short, { maxChars: 4000 })
+  assert.equal(whole.truncated, false)
+  assert.equal(whole.cut, '')
+  assert.equal(whole.keptChars, whole.totalChars)
+})
+
+test('extractPromptSection：不变量 —— keptChars <= maxChars，truncated 与 cut 一致', () => {
+  const text = Array.from({ length: 40 }, (_, i) => `tag_${i}`).join(', ')
+  for (const maxChars of [200, 201, 250, 400]) {
+    const cut = extractPromptSection(text, { maxChars })
+    assert.ok(cut.keptChars <= maxChars, `${maxChars} 超了：${cut.keptChars}`)
+    assert.equal(cut.truncated, cut.keptChars !== cut.totalChars)
+    assert.equal(cut.truncated, cut.cut !== '')
+  }
+})
+
+test('promptBody：只剥 BOM 与标题，不做截断', () => {
+  const text = '# 标题\n\n## 提示词\nmasterpiece, 1girl\n\n## 其他\n别带'
+  const body = promptBody(text)
+  assert.equal(body.heading, '## 提示词')
+  assert.doesNotMatch(body.body, /别带/)
+  assert.match(body.body, /masterpiece, 1girl/)
+  assert.deepEqual(promptBody(undefined), { body: '', heading: '' })
 })
 
 test('scoreDocForLora：名字完全不对，但正文提到 LoRA 名 + 有提示词小标题，照样高分', () => {
@@ -233,6 +294,33 @@ test('rankLoraDocs + chooseLoraDoc：名字不对齐也能 match，散文不参�
     assert.equal(mode, 'match')
     assert.equal(chosen.doc.name, '角色笔记.md')
     assert.match(chosen.section.text, /silver long hair/)
+  })
+})
+
+test('rankLoraDocs：触到扫描上限时记 stoppedBy 并列出没打分的篇目，不再静默', async () => {
+  // 目录里塞 5 篇，扫描上限调成 2 —— 剩下 3 篇必须被点名，不能当作「目录里就这几篇」
+  const files = {}
+  for (let index = 0; index < 5; index += 1) {
+    files[`doc-${index}.txt`] = `1girl, solo, long hair, tag_${index}`
+  }
+  await withDir(files, async (root) => {
+    const listed = await readLoraDocs(root)
+    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors', { limit: 2 })
+    assert.equal(ranked.total, 5)
+    assert.equal(ranked.scanned, 2)
+    assert.equal(ranked.stoppedBy, 'limit')
+    assert.equal(ranked.notScanned.length, 3)
+    // 没参与打分的名字必须来自剩下那 3 篇，不能把已读过的混进来
+    const scannedNames = new Set(listed.docs.slice(0, 2).map((doc) => doc.name))
+    for (const name of ranked.notScanned) assert.ok(!scannedNames.has(name), `${name} 其实读过`)
+  })
+
+  // 没触到上限时两个字段都是空的 —— 别让人误以为「总有文档没看」
+  await withDir({ 'a.txt': '1girl, solo, long hair' }, async (root) => {
+    const listed = await readLoraDocs(root)
+    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    assert.equal(ranked.stoppedBy, '')
+    assert.deepEqual(ranked.notScanned, [])
   })
 })
 

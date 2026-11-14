@@ -80,6 +80,8 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
       loraDocs: res.text.includes('data-comfy-lora-docs'),
       loraDocsApi: res.text.includes('/api/comfyui/lora-docs'),
       loraDocsCount: res.text.includes('data-comfy-doc-count'),
+      // 字数预算：设置页那一栏的数字输入框（默认 4000，可调 200–20000）
+      loraDocsBudget: res.text.includes('data-comfy-budget'),
       // 设置页 UI 优化：审图分区带副标题、图生图/放大并进「功能开关」分区、保存条 sticky
       reviewNote: res.text.includes('reviewNote'),
       features: res.text.includes('data-comfy-sec-head') && res.text.includes('data-comfy-sub'),
@@ -92,7 +94,7 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
   }
 
   console.log(ok
-    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 四条路由 / 保存按钮 / 输出目录与 LoRA 提示词两栏的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色 / 设置页的分区副标题、功能开关合并与 sticky 保存条 / 设置页卡片化与主题 token 上色，手填框与设置页 LoRA 都已移除'
+    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 四条路由 / 保存按钮 / 输出目录与 LoRA 提示词两栏（含字数预算框）的选择按钮 / 桌面端两条桥 / 生图模型下拉的两个分组（扩散模型 + 整合包）/ 暗色下能看清的选项配色 / 设置页的分区副标题、功能开关合并与 sticky 保存条 / 设置页卡片化与主题 token 上色，手填框与设置页 LoRA 都已移除'
     : '\n✗ bundle 内容不是最新代码')
   process.exit(ok ? 0 : 1)
 })().catch((e) => { console.error(e); process.exit(1) })

@@ -44,7 +44,7 @@ Nine tools become available to the model:
 | `comfy_control` | Cancel a job / interrupt the running one / clear the queue / free VRAM |
 | `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity, and `save_to` to keep a copy |
 | `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image, with optional `save_to` |
-| `comfy_lora_doc` | Look inside the LoRA prompt directory: pass `lora` for the matching document (`full: true` for the whole file), omit it to list everything. It never throws — it just explains the situation |
+| `comfy_lora_doc` | Look inside the LoRA prompt directory: pass `lora` for the matching document (`rest: true` for the part cut by the budget, `full: true` for the whole file), omit it to list everything. It never throws — it just explains the situation |
 
 ## Draw mode
 
@@ -164,6 +164,7 @@ The page follows the look of the shipped settings pages: every group is a card (
 | | `upscale.enabled` | off | When off, `comfy_upscale` is rejected |
 | Output | `dir` | empty | Where fetched images are copied; empty keeps them only in ComfyUI own output. **No text field here** — only the **Pick** button (native folder dialog) and a **Clear** button |
 | LoRA prompts | `dir` | empty | Directory of prompt documents; empty means no file is read at all. Same **Pick** / **Clear** pair, and the row then reports "N document(s) found" |
+| | `maxChars` | 4000 | How many characters of one document may be merged into `prompt` (200–20000). Over budget it cuts at a blank line / newline / comma instead of mid-tag |
 
 `provider` / `model` are **a single dropdown**, not free text: when the settings page opens, the browser fetches a list of vision-capable models from the host (`GET /api/comfyui/vision-models`, grouped by provider). Leaving it empty means "follow the current session model". The list is fetched once when the page opens — there is no Refresh button. The dropdown is independent of the review switch — you can inspect the available models before enabling anything.
 
@@ -198,7 +199,7 @@ Many character LoRAs ship with their own notes — trigger words, outfits, palet
 
 | What you do | What happens |
 | --- | --- |
-| `comfy_run` with `lora` | Read every document → score them → take the best one → append its prompt section to `prompt` → the result text says "prompt document: xxx.md (picked by content…; merged into prompt, +123 chars)" |
+| `comfy_run` with `lora` | Read every document → score them → take the best one → append its prompt section to `prompt` → the result text says "prompt document: xxx.md (picked by content…; merged into prompt, 3899 / 11085 chars, budget 4000, stopped at a blank line, 7186 chars left out)" |
 | `comfy_run` with `mode="graph"` and a `LoraLoader` in the workflow | Same — every `LoraLoader` / `LoraLoaderModelOnly` node is scanned, its `lora_name` looked up, and a hit is written into the positive `CLIPTextEncode`. No `lora` argument needed |
 | `comfy_review` with `lora` | Same; the redraw keeps the section too, so the second round does not lose the character setup |
 | pass `lora_doc: "off"` | Skip it for this one call only — the result then says "passed `lora_doc:"off"`, skipped the document" |
@@ -231,6 +232,8 @@ Three outcomes:
 
 Only `.md` / `.markdown` / `.txt`; up to 3 levels of subfolders (grouping by character or style works, and folder names are scored too); files over 256 KB are skipped. Model files (`.safetensors` / `.ckpt` / `.pt` / `.pth` / `.bin` / `.gguf` / `.sft`) are never read as documents — they are only used to decide which LoRA a document sits next to.
 
+Scoring has a budget of its own: **at most the first 120 documents per directory are scored, with 4 MB of total reads** (so one render never turns into a disk crawl). When a limit is hit the plugin stops reading and **says so**: the result text adds "N more documents were not scored (over the 120-document limit: xxx, yyy, zzz …)", and `comfy_lora_doc` lists them too. The separate "skipped" list covers a different case — read failures and files over 256 KB.
+
 What goes inside one document:
 
 ```markdown
@@ -243,9 +246,11 @@ This LoRA was trained on Belle Anima v1 for SDXL.
 masterpiece, 1girl, silver long hair, red eyes, black dress
 ```
 
-With a `# Prompt` / `## Prompt` / `## 提示词` heading only **the section below it** is used (up to the next heading of the same or higher level); without one, the whole file is used. Anything over 1200 characters is truncated — better to feed a little less than to stuff a whole manual into the prompt.
+With a `# Prompt` / `## Prompt` / `## 提示词` heading only **the section below it** is used (up to the next heading of the same or higher level); without one, the whole file is used. That section is bounded by the **character budget** on the settings page (`loraDocs.maxChars`, default 4000, adjustable 200–20000): over budget it does not cut mid-tag — it walks down the ladder **last blank line → newline → comma/、/semicolon → space**, and a candidate must sit at least 60% into the budget (otherwise the next rung is tried); only when nothing qualifies does it fall back to a hard cut. The result text tells you how many characters were merged, how long the original was, which boundary stopped it, and how much was left out.
 
-To see what the plugin actually picked, call `comfy_lora_doc`: with no arguments it lists the candidates (with their subfolder paths and which ones look like prompts); with `lora` it returns the **score table** plus the chosen document's prompt section, and `full: true` returns the whole file. The tool **never throws** — no directory, a wrong path, or no match all come back as a one-line explanation.
+In practice many character documents — Chinese "prompt lists" especially — carry no `#` heading at all, only `【一】` / `【三】`-style section markers. Those count as "no heading", so the whole file is used and the budget decides. The clearer the structure (put the copy-paste tag block under its own heading), the better the text handed to the encoder.
+
+To see what the plugin actually picked, call `comfy_lora_doc`: with no arguments it lists the candidates (with their subfolder paths and which ones look like prompts); with `lora` it returns the **score table** plus the chosen document's prompt section and reports "merged X chars of Y original / stopped at which boundary"; `rest: true` shows the part that was left out, `full: true` returns the whole file. The tool **never throws** — no directory, a wrong path, or no match all come back as a one-line explanation.
 
 ## Configuration
 

@@ -213,6 +213,7 @@ test('只读路由挂上 /api/comfyui/lora-docs，给设置页报「识别到几
   const body = await response.json()
   assert.equal(body.ok, true)
   assert.equal(body.dir, '')
+  assert.equal(body.maxChars, 4000)
   assert.equal(body.count, 0)
   assert.equal(body.promptish, 0)
   assert.deepEqual(body.docs, [])
@@ -248,12 +249,14 @@ test('配了真目录时，路由顺带报「几篇候选 / 其中几篇像提�
       'masterpiece, best quality, 1girl, silver long hair',
     ].join('\n'))
     await writeFile(join(root, 'notes.txt'), '这里记一点杂事。\n买牛奶，修图，回消息。')
-    const { routes } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root } })
+    const { routes } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root, maxChars: 6000 } })
     const route = routes.find((r) => r.path === '/api/comfyui/lora-docs')
     const response = await route.fetch(new Request('http://localhost/api/comfyui/lora-docs'))
     assert.equal(response.status, 200)
     const body = await response.json()
     assert.equal(body.ok, true)
+    // 设置页要能看出「判定用的是多少字的预算」，否则改了预算它也不会重算
+    assert.equal(body.maxChars, 6000)
     assert.equal(body.count, 2)
     // 只有「角色笔记.md」里那串 tag 像提示词；notes.txt 是散文
     assert.equal(body.promptish, 1)
@@ -286,6 +289,57 @@ test('comfy_lora_doc：给了 lora 就返回打分表，名字不对齐也能挑
     assert.match(result.text, /silver long hair/)
     // 散文那篇也出现在打分表里（透明），但 0 分、不会被挑中
     assert.match(result.text, /0\s+画风随笔\.txt/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('comfy_lora_doc：长文档说清并了多少字，rest:true 给出被截掉的后半段', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-rest-'))
+  try {
+    const tags = Array.from({ length: 100 }, (_, i) => `tag_${i}`)
+    const docText = [
+      '这套是 Belle Anima v1 训的。',
+      '',
+      '## 提示词',
+      'masterpiece, best quality, 1girl, silver long hair,',
+      tags.join(', '),
+      '',
+      '## 参数建议',
+      'steps 28, cfg 5',
+    ].join('\n')
+    await writeFile(join(root, 'belle_anima_v1.txt'), docText)
+    const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root, maxChars: 300 } })
+    const doc = tools.get('comfy_lora_doc')
+    const head = await doc.execute({ lora: 'belle_anima_v1.safetensors' }, createExec())
+    assert.match(head.text, /并进 prompt 300 字? ?\/原文|\/ 原文 \d+ 字/)
+    assert.match(head.text, /上限 300/)
+    assert.match(head.text, /rest:true/)
+    assert.match(head.text, /full:true/)
+    // 默认视图只给收口后的那一段，后半段不在里面
+    assert.doesNotMatch(head.text, /参数建议/)
+
+    const rest = await doc.execute({ lora: 'belle_anima_v1.safetensors', rest: true }, createExec())
+    assert.match(rest.text, /后面还剩 \d+ 字没并/)
+    // 后半段确实接着默认视图的末尾
+    assert.match(rest.text, /tag_9\d/)
+    assert.doesNotMatch(rest.text, /masterpiece/)
+
+    const full = await doc.execute({ lora: 'belle_anima_v1.safetensors', full: true }, createExec())
+    assert.match(full.text, /masterpiece/)
+    assert.match(full.text, /参数建议/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('comfy_lora_doc：短文档 rest:true 说明「没有剩余内容」', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-rest-short-'))
+  try {
+    await writeFile(join(root, 'belle_anima_v1.txt'), '## 提示词\nmasterpiece, 1girl')
+    const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root } })
+    const result = await tools.get('comfy_lora_doc').execute({ lora: 'belle_anima_v1.safetensors', rest: true }, createExec())
+    assert.match(result.text, /没有剩余内容/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -347,8 +401,60 @@ test('挂了 LoRA 但传 lora_doc:"off"：结果里交代「跳过了文档」',
   }
 })
 
-test('graph 模式里有 LoraLoader：照样查文档并把提示词并进正面 CLIPTextEncode', async () => {
+test('graph 模式里有 LoraLoader：长文档按边界收口，结果里写明原文多少字 / 并了多少字', async () => {
   const root = await mkdtemp(join(tmpdir(), 'comfyui-graph-doc-'))
+  const server = await startFakeComfy()
+  try {
+    // 一篇真实规模的角色卡：正文里提到 LoRA 名，提示词段远超过 500 字的上限
+    const tags = Array.from({ length: 200 }, (_, i) => `tag_${i}`)
+    const docText = [
+      '这套是 Belle Anima v1 训的。',
+      '',
+      '## 提示词',
+      'masterpiece, best quality, 1girl, silver long hair,',
+      tags.join(', '),
+    ].join('\n')
+    await writeFile(join(root, 'belle_anima_v1.txt'), docText)
+    await writeFile(join(root, 'belle_anima_v1.safetensors'), '')
+    const { tools } = boot({
+      baseUrl: server.baseUrl,
+      timeoutMs: 2000,
+      draw: { unet: 'a.safetensors', lora: true },
+      loraDocs: { dir: root, maxChars: 500 },
+    })
+    const graph = {
+      1: { class_type: 'CheckpointLoaderSimple', inputs: { ckpt_name: 'ckpt.safetensors' } },
+      2: { class_type: 'LoraLoader', inputs: { lora_name: 'belle_anima_v1.safetensors', model: ['1', 0], clip: ['1', 1], strength_model: 0.8, strength_clip: 0.8 } },
+      3: { class_type: 'CLIPTextEncode', inputs: { text: 'a girl', clip: ['2', 1] } },
+      4: { class_type: 'CLIPTextEncode', inputs: { text: 'lowres', clip: ['2', 1] } },
+    }
+    const result = await tools.get('comfy_run').execute({ mode: 'graph', graph }, createExec())
+    // 结果里交代命中了哪篇，并且写明预算
+    assert.match(result.text, /belle_anima_v1\.txt/)
+    assert.match(result.text, /已并入/)
+    assert.match(result.text, /上限 500/)
+    assert.match(result.text, /没并/)
+    assert.match(result.text, /rest:true/)
+    // 提交给 ComfyUI 的正面 CLIPTextEncode 真的并进了文档里的提示词，且不超过预算
+    const submitted = JSON.parse(server.promptIds[0])
+    const positive = Object.values(submitted.prompt).find((n) => n.class_type === 'CLIPTextEncode' && n.inputs.text.includes('a girl'))
+    assert.ok(positive, '没找到正面 CLIPTextEncode 节点')
+    assert.match(positive.inputs.text, /silver long hair/)
+    const docPart = positive.inputs.text.slice('a girl\n\n'.length)
+    assert.ok(docPart.length <= 500, `并进 prompt 的文档段超了上限：${docPart.length}`)
+    // 收口必须落在边界上：并进去的这段是原文的前缀，且原文紧接着的字符是分隔符 —— 没切半个 tag
+    const sourceSection = docText.split('## 提示词\n')[1].trim()
+    assert.ok(sourceSection.startsWith(docPart), '并进的不是原文前缀')
+    const nextChar = sourceSection.slice(docPart.length, docPart.length + 1)
+    assert.ok(nextChar === '' || /[\s,，、;；]/.test(nextChar), `切在字符中间，后面是 ${JSON.stringify(nextChar)}`)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await server.close()
+  }
+})
+
+test('graph 模式里有 LoraLoader：短文档全篇并入，结果里说「全篇并进去了」', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-graph-doc-short-'))
   const server = await startFakeComfy()
   try {
     await writeFile(join(root, '铃.txt'), [
@@ -371,14 +477,8 @@ test('graph 模式里有 LoraLoader：照样查文档并把提示词并进正面
       4: { class_type: 'CLIPTextEncode', inputs: { text: 'lowres', clip: ['2', 1] } },
     }
     const result = await tools.get('comfy_run').execute({ mode: 'graph', graph }, createExec())
-    // 结果里交代命中了哪篇
     assert.match(result.text, /铃\.txt/)
-    assert.match(result.text, /已并入/)
-    // 提交给 ComfyUI 的正面 CLIPTextEncode 真的并进了文档里的提示词
-    const submitted = JSON.parse(server.promptIds[0])
-    const positive = Object.values(submitted.prompt).find((n) => n.class_type === 'CLIPTextEncode' && n.inputs.text.includes('a girl'))
-    assert.ok(positive, '没找到正面 CLIPTextEncode 节点')
-    assert.match(positive.inputs.text, /silver long hair/)
+    assert.match(result.text, /全篇并进去了/)
   } finally {
     await rm(root, { recursive: true, force: true })
     await server.close()

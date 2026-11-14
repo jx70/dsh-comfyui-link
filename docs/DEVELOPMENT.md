@@ -255,15 +255,19 @@ console.log([...used].filter(n=>!defined.has(n)));
 
 ### LoRA 提示词文档：打分链 score → rank → choose + 一条「留空就什么都不读」的边界
 
-`index.js` 导出了 `normalizeLoraKey` / `nameTokens` / `looksLikePrompt` / `docTitle` / `extractPromptSection` / `scoreDocForLora` / `readLoraDocs` / `rankLoraDocs` / `chooseLoraDoc` / `composeLoraPrompt`，`test/lora-docs.test.mjs` 直接调它们（临时目录 + 假文档，不需要 ComfyUI）。改这块时守住四条：
+`index.js` 导出了 `normalizeLoraKey` / `nameTokens` / `looksLikePrompt` / `docTitle` / `promptBody` / `extractPromptSection` / `scoreDocForLora` / `readLoraDocs` / `rankLoraDocs` / `chooseLoraDoc` / `composeLoraPrompt`，`test/lora-docs.test.mjs` 直接调它们（临时目录 + 假文档，不需要 ComfyUI）。改这块时守住这几条：
 
 - **`loraDocs.dir` 留空必须完全不动作**（不读目录、不扫文件）。这是用户明确的边界，`test/lora-docs.test.mjs` 的「目录留空直接返回空清单」与 `test/registration.test.mjs` 的 lora-docs 路由 200 + 空清单两条一起钉着。
 - **剥扩展名要走 `KNOWN_EXTS` 白名单**。用「最后一个点之后 ≤8 个字母」判断会漏掉 `safetensors`（11 个字母），后果是文件名这一档永远不命中 —— 这个 bug 写测试时被抓到过一次，别改回去。
 - **文件名是信号，不是门槛**。`scoreDocForLora` 的每一档都是加分项，没有任何一项是「不满足就淘汰」；`chooseLoraDoc` 才是唯一的分流点（`match` / `sole` / `none`）。想让某个信号更管用就调权重，别在 `scoreDocForLora` 里加 `return 0` 之类的短路。
 - **同目录摆放是最硬的信号**。`readLoraDocs` 在每层先扫一遍本层文件，把扩展名命中 `LORA_MODEL_EXTS` 的模型名规范化后写进该层文档的 `siblings`；`scoreDocForLora` 据此加 `+120`（该文件夹只有这一个模型）/ `+60`（旁边还有别的模型）。这一档排在文件名一致 +100 之前，因为「一个角色一个文件夹、模型与提示词并排」是最常见的摆法，名字怎么起都不该影响配对。模型文件本身永远不会被当文档读。
 - **文档读不了不抛错**。`readLoraDocs` 返回 `{ok:false, error}`，`rankLoraDocs` 把单篇读失败塞进 `skipped`，`comfy_lora_doc` 与路由都把它翻译成一句话。挂 LoRA 出图是主流程，提示词文档是附加值，不能因为目录被删了就让出图失败。
+- **超预算时按边界收口，绝不从字符中间切**。`extractPromptSection` 依次试空行 → 换行 → 逗号/顿号/分号 → 空格，候选位置要 ≥ `maxChars × LORA_DOC_BOUNDARY_MIN_RATIO`（0.6），四档都不满足才 `cut = 'hard'` 兜底。半个 tag（`long_hair, blue` 的 `blu`）进了 prompt 会把编码器带到别的地方，`test/registration.test.mjs` 的长文档用例直接断言「并进去的这段是原文前缀，且原文紧随字符是分隔符」。返回的 `{totalChars, keptChars, cut}` 是给人看的报告字段，任何一处改动都要保证 `keptChars ≤ maxChars` 且 `truncated ⟺ cut !== ''`。
+- **上限是配置项，不是常量**。`LORA_DOC_MAX_CHARS = 4000` 只是 schema 的默认值（范围 200–20000，`LORA_DOC_CHARS_MIN` / `LORA_DOC_CHARS_MAX`）；`readFeatureConfig` 还会用 `Number.isInteger` 夹一层兜底 —— schemastery 对越界值、字符串、小数是**直接抛错**（不是回退默认值），cordis.patch.yml 被手写成 `maxChars: "6000"` 会让整个插件加载失败，所以配置读入必须自己夹。
 
 递归扫描（`readLoraDocs`）有三道闸，改的时候别顺手放开：`LORA_DOC_MAX_DEPTH = 3`（防止有人把整个盘指进来）、`LORA_DOC_MAX_BYTES = 256 * 1024`（单篇上限）、`seen` 集合存 `realpath`（符号链接/联接点指回上层时不会原地打转）。子目录名会作为 `rel` 参与打分，同目录的模型文件会作为 `siblings` 参与打分 —— 这两条一起让「按角色分文件夹摆」能工作。
+
+打分侧另有两道**静默**闸：`rankLoraDocs` 只处理前 `LORA_DOC_SCAN_LIMIT = 120` 篇、累计读 `LORA_DOC_SCAN_BYTES = 4 MB` 就停。它们默认是**不报**的（`break` 直接退出循环，不进 `skipped`），所以 `ranked.stoppedBy` / `ranked.notScanned` 必须一路带到结果文本与 `comfy_lora_doc` 里 —— 「安静地少看几篇」和「文档不存在」对用户是两件事，前者得说。`readLoraDocs` 的 `skipped` 只装读失败与超 256 KB 的篇目，两者别混。
 
 ### img2img 的底图要先上传
 

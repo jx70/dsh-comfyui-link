@@ -64,6 +64,8 @@ export const Config = z.object({
   }).volatile(),
   loraDocs: z.object({
     dir: z.string().default('').description('LoRA 提示词文档目录；绝对路径直接用，相对路径相对 ComfyUI 的 output；留空＝不查文档'),
+    maxChars: z.number().step(1).min(200).max(20000).default(4000)
+      .description('一篇文档最多并入 prompt 多少字（200–20000）；超了按空行/换行/逗号边界收口，不切半个 tag'),
   }).volatile(),
 })
 
@@ -178,8 +180,8 @@ function unwrapVolatile(value) {
  * 读取当前功能开关（每次都现读 volatile 引用，热编辑即时生效）。
  * 默认：review/img2img/upscale 全关闭；draw.unet 留空（用文件夹里第一个）、draw.lora 关闭；
  * output.dir 留空（图就留在 ComfyUI 自己的 output 里，不额外复制）；
- * loraDocs.dir 留空（挂 LoRA 时不去找提示词文档）。
- * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}, loraDocs:{dir:string}}}
+ * loraDocs.dir 留空（挂 LoRA 时不去找提示词文档），maxChars 默认 4000。
+ * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}, loraDocs:{dir:string,maxChars:number}}}
  */
 function readFeatureConfig(config) {
   const review = unwrapVolatile(config?.review) ?? {}
@@ -205,6 +207,10 @@ function readFeatureConfig(config) {
     },
     loraDocs: {
       dir: typeof loraDocs.dir === 'string' ? loraDocs.dir.trim() : '',
+      // 越界值在 schema 层就会被拒；这里再夹一层，防 cordis.patch.yml 里手写非法值时整插件加载失败
+      maxChars: Number.isInteger(loraDocs.maxChars)
+        ? Math.min(LORA_DOC_CHARS_MAX, Math.max(LORA_DOC_CHARS_MIN, loraDocs.maxChars))
+        : LORA_DOC_MAX_CHARS,
     },
   }
 }
@@ -344,8 +350,16 @@ const LORA_MODEL_EXTS = new Set(['.safetensors', '.ckpt', '.pt', '.pth', '.bin',
 const LORA_DOC_MAX_DEPTH = 3
 /** 单篇文档超过这个字节数就跳过（提示词文档没有这么大） */
 const LORA_DOC_MAX_BYTES = 256 * 1024
-/** 并进 prompt 的提示词段最多多少字 */
-const LORA_DOC_MAX_CHARS = 1200
+/** 并进 prompt 的提示词段默认最多多少字（设置页可改，见 Config.loraDocs.maxChars） */
+const LORA_DOC_MAX_CHARS = 4000
+/** 字数上限的允许范围：太小等于不喂，太大就把整篇说明塞进 prompt */
+const LORA_DOC_CHARS_MIN = 200
+const LORA_DOC_CHARS_MAX = 20000
+/**
+ * 按边界收口时，边界位置至少要占到上限的这个比例才用它。
+ * 否则「最后一个逗号在 3 个字处」会把 4000 的预算浪费成 3 个字。
+ */
+const LORA_DOC_BOUNDARY_MIN_RATIO = 0.6
 /** 一次最多读多少篇来打分（目录里塞了几百篇时别把 IO 打满） */
 const LORA_DOC_SCAN_LIMIT = 120
 /** 打分阶段累计读入的字节上限，超了就只看前若干篇 */
@@ -379,13 +393,14 @@ export function normalizeLoraKey(name) {
 }
 
 /**
- * 从一篇文档里取出「提示词段」：
+ * 从一篇文档里取出「提示词段」的原始正文（不截断），供 extractPromptSection 与
+ * comfy_lora_doc 的 rest 分支共用 —— 标题判定只写一份。
  * 有 `# 提示词` / `## Prompt` 这类标题就取它下面的内容，没有就取全文。
- * 超过 maxChars 截断并标记（宁可少喂一点，也别把整篇说明塞进 prompt）。
+ * @returns {{body:string, heading:string}}
  */
-export function extractPromptSection(text, { maxChars = LORA_DOC_MAX_CHARS } = {}) {
+export function promptBody(text) {
   const raw = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
-  if (raw.trim().length === 0) return { text: '', truncated: false, heading: '' }
+  if (raw.trim().length === 0) return { body: '', heading: '' }
   const lines = raw.split(/\r?\n/)
   const headingRe = /^(#{1,6})\s*(prompt|positive\s*prompt|提示词|正面提示词)\s*[:：]?\s*$/i
   let start = -1
@@ -399,23 +414,63 @@ export function extractPromptSection(text, { maxChars = LORA_DOC_MAX_CHARS } = {
     heading = lines[index].trim()
     break
   }
-  let body = ''
-  if (start < 0) {
-    body = raw
-  } else {
-    const out = []
-    for (let index = start; index < lines.length; index += 1) {
-      const line = lines[index]
-      const next = /^(#{1,6})\s+/.exec(line.trim())
-      // 遇到同级或更高级的标题就收工，子标题（更深）算正文
-      if (next && next[1].length <= level) break
-      out.push(line)
-    }
-    body = out.join('\n')
+  if (start < 0) return { body: raw, heading: '' }
+  const out = []
+  for (let index = start; index < lines.length; index += 1) {
+    const line = lines[index]
+    const next = /^(#{1,6})\s+/.exec(line.trim())
+    // 遇到同级或更高级的标题就收工，子标题（更深）算正文
+    if (next && next[1].length <= level) break
+    out.push(line)
   }
+  return { body: out.join('\n'), heading }
+}
+
+/**
+ * 从一篇文档里取出「提示词段」，超过上限就**按边界收口**，不切半个 tag。
+ * 边界优先级：空行 > 换行 > 逗号/顿号/分号 > 空格 > 硬切；
+ * 边界位置必须 >= 上限 * LORA_DOC_BOUNDARY_MIN_RATIO，太靠前就换下一档。
+ *
+ * 返回 { text, truncated, heading, totalChars, keptChars, cut }：
+ *   truncated=false ⟺ keptChars === totalChars ⟺ cut === ''
+ *   cut ∈ '' | 'blank' | 'line' | 'comma' | 'space' | 'hard'
+ */
+export function extractPromptSection(text, { maxChars = LORA_DOC_MAX_CHARS } = {}) {
+  const limit = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : LORA_DOC_MAX_CHARS
+  const { body, heading } = promptBody(text)
   const trimmed = body.trim()
-  if (trimmed.length <= maxChars) return { text: trimmed, truncated: false, heading }
-  return { text: trimmed.slice(0, maxChars).trim(), truncated: true, heading }
+  const totalChars = trimmed.length
+  if (totalChars === 0) {
+    return { text: '', truncated: false, heading, totalChars: 0, keptChars: 0, cut: '' }
+  }
+  if (totalChars <= limit) {
+    return { text: trimmed, truncated: false, heading, totalChars, keptChars: totalChars, cut: '' }
+  }
+  const window = trimmed.slice(0, limit)
+  const floor = Math.floor(limit * LORA_DOC_BOUNDARY_MIN_RATIO)
+  const atLeastFloor = (pos) => pos >= floor
+  const plan = [
+    // promptBody 已经把所有换行归一成 \n，所以空行就是 \n\n
+    { cut: 'blank', find: (w) => w.lastIndexOf('\n\n') },
+    { cut: 'line', find: (w) => w.lastIndexOf('\n') },
+    { cut: 'comma', find: (w) => Math.max(...[',', '，', '、', ';', '；'].map((sep) => w.lastIndexOf(sep))) },
+    { cut: 'space', find: (w) => w.lastIndexOf(' ') },
+  ]
+  let cut = 'hard'
+  let head = window
+  for (const step of plan) {
+    const pos = step.find(window)
+    if (pos < 0 || !atLeastFloor(pos)) continue
+    cut = step.cut
+    head = window.slice(0, pos)
+    break
+  }
+  const kept = head.replace(/[\s,，、;；]+$/u, '').trim()
+  if (kept.length === 0) {
+    // 极端：上限极小而开头全是分隔符 —— 宁可硬切也不返回空串
+    return { text: window.trim(), truncated: true, heading, totalChars, keptChars: window.trim().length, cut: 'hard' }
+  }
+  return { text: kept, truncated: true, heading, totalChars, keptChars: kept.length, cut }
 }
 
 /** 把名字切成词：'Belle Anima v1' → ['belle','anima','v1'] */
@@ -455,14 +510,14 @@ export function docTitle(text) {
  * 给一篇文档打分：这个 LoRA 该不该用它。
  * 分数只用于排序与「够不够格」判断，各项权重都集中在这里，改起来一目了然。
  * 注意文件名只是「一个信号」，不再是门槛 —— 名字完全不对、正文里提到了也照样能挑中。
- * @returns {{score:number, reasons:string[], section:{text:string,truncated:boolean,heading:string},
+ * @returns {{score:number, reasons:string[], section:{text:string,truncated:boolean,heading:string,totalChars:number,keptChars:number,cut:string},
  *   promptish:boolean, hasPromptHeading:boolean, title:string}}
  */
-export function scoreDocForLora(doc, text, loraName) {
+export function scoreDocForLora(doc, text, loraName, options = {}) {
   const reasons = []
   let score = 0
   const raw = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
-  const section = extractPromptSection(raw)
+  const section = extractPromptSection(raw, { maxChars: options.maxChars })
   const hasPromptHeading = section.heading.length > 0
   const title = docTitle(raw)
   const loraKey = normalizeLoraKey(loraName)
@@ -547,18 +602,26 @@ export function scoreDocForLora(doc, text, loraName) {
 
 /**
  * 逐篇读入候选文档并打分，按分数从高到低排（同分按文件名，结果可复现）。
- * 读不了的文件进 skipped，不抛。受 LORA_DOC_SCAN_LIMIT / LORA_DOC_SCAN_BYTES 约束。
+ * 读不了的文件进 skipped，不抛。受 LORA_DOC_SCAN_LIMIT / LORA_DOC_SCAN_BYTES 约束；
+ * 超限停下时把没读到的文件名放进 notScanned 并记 stoppedBy，不再静默。
+ * @returns {{candidates:Array, scanned:number, total:number, skipped:string[],
+ *   stoppedBy:''|'limit'|'budget', notScanned:string[]}}
  */
 export async function rankLoraDocs(docs, loraName, options = {}) {
   const limit = Number.isInteger(options.limit) && options.limit > 0 ? options.limit : LORA_DOC_SCAN_LIMIT
   const budget = Number.isInteger(options.budget) && options.budget > 0 ? options.budget : LORA_DOC_SCAN_BYTES
+  const maxChars = Number.isInteger(options.maxChars) && options.maxChars > 0 ? options.maxChars : LORA_DOC_MAX_CHARS
   const list = Array.isArray(docs) ? docs : []
   const candidates = []
   const skipped = []
   let scanned = 0
   let spent = 0
+  let stoppedBy = ''
   for (const doc of list) {
-    if (scanned >= limit || spent >= budget) break
+    if (scanned >= limit || spent >= budget) {
+      stoppedBy = scanned >= limit ? 'limit' : 'budget'
+      break
+    }
     let raw = ''
     try {
       raw = await readFile(doc.file, 'utf8')
@@ -568,13 +631,15 @@ export async function rankLoraDocs(docs, loraName, options = {}) {
     }
     scanned += 1
     spent += Buffer.byteLength(raw, 'utf8')
-    candidates.push({ doc, ...scoreDocForLora(doc, raw, loraName), raw })
+    candidates.push({ doc, ...scoreDocForLora(doc, raw, loraName, { maxChars }), raw })
   }
   candidates.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score
     return String(a.doc?.name ?? '').localeCompare(String(b.doc?.name ?? ''))
   })
-  return { candidates, scanned, total: list.length, skipped }
+  // stoppedBy 非空时，扫描停下的位置之后还有文档没参与打分
+  const notScanned = stoppedBy === '' ? [] : list.slice(scanned).map((doc) => String(doc?.name ?? doc?.file ?? '?'))
+  return { candidates, scanned, total: list.length, skipped, stoppedBy, notScanned }
 }
 
 /**
@@ -1000,29 +1065,36 @@ export function apply(ctx, config) {
 
   /**
    * 给某个 LoRA 挑提示词文档：读目录 → 逐篇打分 → 排序 → 选一篇。
-   * 返回 { configured, dir, mode, doc, score, reasons, ranked, count, promptish, scanned, text,
-   *        truncated, heading, error, skipped }：
+   * 返回 { configured, dir, maxChars, mode, doc, score, reasons, ranked, count, promptish,
+   *        scanned, text, truncated, heading, totalChars, keptChars, cut, error, skipped,
+   *        stoppedBy, notScanned }：
    *   configured=false → 设置里没选目录，调用方什么都不用做（一个文件都没读）
    *   mode='none'      → 都不像，doc 为 null，ranked 里是前几名（给人看为什么没挑中）
+   *   totalChars/keptChars/cut → 原文多少字、实际并进 prompt 多少字、切在什么边界
    */
   async function lookupLoraDoc(loraName, signal) {
+    const features = readFeatureConfig(config).loraDocs
+    const maxChars = features.maxChars
     const dir = await resolvedLoraDocDir(signal)
     if (dir.length === 0) {
       return {
-        configured: false, dir: '', mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
-        count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '', error: '', skipped: [],
+        configured: false, dir: '', maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
+        count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '',
+        totalChars: 0, keptChars: 0, cut: '', error: '', skipped: [], stoppedBy: '', notScanned: [],
       }
     }
     const listed = await readLoraDocs(dir)
     if (listed.ok !== true) {
       return {
-        configured: true, dir, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
+        configured: true, dir, maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
         count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '',
+        totalChars: 0, keptChars: 0, cut: '',
         error: listed.error ?? '读不了目录', skipped: listed.skipped ?? [],
+        stoppedBy: '', notScanned: [],
       }
     }
     const docs = listed.docs ?? []
-    const ranked = await rankLoraDocs(docs, loraName)
+    const ranked = await rankLoraDocs(docs, loraName, { maxChars })
     const { chosen, mode } = chooseLoraDoc(ranked.candidates)
     const promptish = ranked.candidates.filter((item) => item.promptish || item.hasPromptHeading).length
     const top = ranked.candidates.slice(0, 5).map((item) => ({
@@ -1031,32 +1103,76 @@ export function apply(ctx, config) {
     const skipped = [...(listed.skipped ?? []), ...ranked.skipped]
     if (!chosen) {
       return {
-        configured: true, dir, mode: 'none', doc: null, score: 0, reasons: [], ranked: top,
+        configured: true, dir, maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: top,
         count: docs.length, promptish, scanned: ranked.scanned, text: '', truncated: false,
-        heading: '', error: '', skipped,
+        heading: '', totalChars: 0, keptChars: 0, cut: '', error: '', skipped,
+        stoppedBy: ranked.stoppedBy ?? '', notScanned: ranked.notScanned ?? [],
       }
     }
-    const section = chosen.section ?? extractPromptSection('')
+    const section = chosen.section ?? extractPromptSection('', { maxChars })
     return {
-      configured: true, dir, mode, doc: chosen.doc, score: chosen.score, reasons: chosen.reasons,
+      configured: true, dir, maxChars, mode, doc: chosen.doc, score: chosen.score, reasons: chosen.reasons,
       ranked: top, count: docs.length, promptish, scanned: ranked.scanned,
       text: section.text, truncated: section.truncated === true, heading: section.heading ?? '',
+      totalChars: Number.isInteger(section.totalChars) ? section.totalChars : section.text.length,
+      keptChars: Number.isInteger(section.keptChars) ? section.keptChars : section.text.length,
+      cut: typeof section.cut === 'string' ? section.cut : '',
       error: '', skipped,
+      stoppedBy: ranked.stoppedBy ?? '', notScanned: ranked.notScanned ?? [],
     }
   }
 
-  /** 把挑中的文档并进 prompt，并把结果写成给人看的一行（没有就返回空串） */
+  /** 把截断边界翻成人话 */
+  const CUT_WORDS = {
+    blank: '空行边界',
+    line: '换行边界',
+    comma: '逗号边界',
+    space: '空格边界',
+    hard: '硬切（文档里没找到可收口的边界）',
+  }
+
+  /**
+   * 把挑中的文档并进 prompt，并把结果写成给人看的一行（没有就返回空串）。
+   * 返回 { prompt, note, budget }：budget 是结构化的预算信息，调用方可原样带走。
+   */
   function applyLoraDoc(lookup) {
-    if (!lookup.configured) {
-      return { prompt: '', note: '提示词文档：挂了 LoRA，但设置里没配「LoRA 提示词」目录，这次没查文档。' }
+    const budget = {
+      docName: lookup.doc?.name ?? '',
+      mode: lookup.mode ?? 'none',
+      kept: lookup.keptChars ?? 0,
+      total: lookup.totalChars ?? 0,
+      maxChars: lookup.maxChars ?? LORA_DOC_MAX_CHARS,
+      cut: lookup.cut ?? '',
+      stoppedBy: lookup.stoppedBy ?? '',
+      notScanned: lookup.notScanned ?? [],
+      skipped: lookup.skipped ?? [],
     }
-    if (lookup.error) return { prompt: '', note: `提示词文档：${lookup.error}` }
+    if (!lookup.configured) {
+      return {
+        prompt: '',
+        note: '提示词文档：挂了 LoRA，但设置里没配「LoRA 提示词」目录，这次没查文档。',
+        budget,
+      }
+    }
+    if (lookup.error) return { prompt: '', note: `提示词文档：${lookup.error}`, budget }
     const why = Array.isArray(lookup.reasons) && lookup.reasons.length > 0
       ? `（${lookup.reasons.join('、')}）`
       : ''
+    // 被跳过 / 没参与打分的文档也要说出来，否则用户以为整目录都看过了
+    const tail = []
+    if (budget.stoppedBy !== '') {
+      const reason = budget.stoppedBy === 'limit' ? `超过 ${LORA_DOC_SCAN_LIMIT} 篇的上限` : `超过 ${Math.round(LORA_DOC_SCAN_BYTES / 1024 / 1024)} MB 的读取预算`
+      const names = budget.notScanned.slice(0, 3).join('、')
+      const more = budget.notScanned.length > 3 ? ` 等 ${budget.notScanned.length} 篇` : ''
+      tail.push(`另有 ${budget.notScanned.length} 篇没参与打分（${reason}：${names}${more}）`)
+    }
+    if (budget.skipped.length > 0) {
+      tail.push(`${budget.skipped.length} 篇被跳过（${budget.skipped.slice(0, 3).join('；')}${budget.skipped.length > 3 ? ' …' : ''}）`)
+    }
+    const tailText = tail.length > 0 ? `；${tail.join('；')}` : ''
     if (!lookup.doc) {
       if (lookup.count === 0) {
-        return { prompt: '', note: `提示词文档：目录里没有文档（${lookup.dir}）` }
+        return { prompt: '', note: `提示词文档：目录里没有文档（${lookup.dir}）${tailText}`, budget }
       }
       const near = (lookup.ranked ?? [])
         .slice(0, 3)
@@ -1066,18 +1182,25 @@ export function apply(ctx, config) {
         prompt: '',
         note: `提示词文档：${lookup.count} 篇候选里没有像这个 LoRA 的提示词文档，这次没并入`
           + `（其中 ${lookup.promptish} 篇像提示词）${near ? `；分数最高的几篇：${near}` : ''}`
-          + '。想自己看一眼用 comfy_lora_doc。',
+          + `${tailText}。想自己看一眼用 comfy_lora_doc。`,
+        budget,
       }
     }
     if (lookup.text.length === 0) {
-      return { prompt: '', note: `提示词文档：${lookup.doc.name} 里没有可用的提示词段${why}` }
+      return { prompt: '', note: `提示词文档：${lookup.doc.name} 里没有可用的提示词段${why}${tailText}`, budget }
     }
     const prefix = lookup.mode === 'sole'
       ? `提示词文档：${lookup.doc.name}（目录里唯一像提示词的那篇，没明确提到这个 LoRA${why}；已并入 prompt，`
       : `提示词文档：${lookup.doc.name}（按内容挑中${why}；已并入 prompt，`
+    // 截断与否都要报出「原文多少字 / 实际并了多少字」，不能只留一句「已截断」
+    const size = lookup.truncated
+      ? `${budget.kept} / ${budget.total} 字，上限 ${budget.maxChars}，切在${CUT_WORDS[budget.cut] ?? '边界'}，`
+        + `余下 ${Math.max(0, budget.total - budget.kept)} 字没并 —— 想看整篇传 full:true，只看后段传 rest:true`
+      : `${budget.total} 字，全篇并进去了`
     return {
       prompt: lookup.text,
-      note: `${prefix}+${lookup.text.length} 字${lookup.truncated ? '，原文更长已截断' : ''}）`,
+      note: `${prefix}${size}${tailText}）`,
+      budget,
     }
   }
 
@@ -2039,10 +2162,12 @@ export function apply(ctx, config) {
       + '不给 lora 就列出目录里的候选。'
       + '目录在插件设置页里选；没选目录、目录不存在、挑不中、读不了都只是说明情况，不会报错。'
       + 'comfy_run / comfy_review 挂 LoRA 时会自动做同样的事并把提示词段并进 prompt，'
-      + '这个工具是用来「先看一眼」或者看全文的。',
+      + '这个工具是用来「先看一眼」或者看全文的。'
+      + '文档超过字数上限时默认只并入收口后的那一段，余下的部分用 rest: true 看、整篇用 full: true 看。',
     parameters: params({
       lora: s('LoRA 文件名（如 belle_anima_v1.safetensors）。省略则列出目录里的候选文档'),
       full: { type: 'boolean', description: 'true 时返回挑中那篇的全文（不截断），默认只给提示词段' },
+      rest: { type: 'boolean', description: 'true 时返回「超过字数上限、没并进 prompt」的那部分原文（full 优先）' },
     }, []),
     output: output(),
     isConcurrencySafe: () => true,
@@ -2068,6 +2193,7 @@ export function apply(ctx, config) {
       }
       const docs = listed.docs ?? []
       const skipped = [...(listed.skipped ?? [])]
+      const maxChars = features.loraDocs.maxChars
       const lora = typeof args.lora === 'string' ? args.lora.trim() : ''
       if (lora.length === 0) {
         if (docs.length === 0) {
@@ -2079,7 +2205,7 @@ export function apply(ctx, config) {
           let promptish = false
           try {
             const raw = await readFile(doc.file, 'utf8')
-            const section = extractPromptSection(raw)
+            const section = extractPromptSection(raw, { maxChars })
             promptish = looksLikePrompt(section.text.length > 0 ? section.text : raw)
           } catch {
             promptish = false
@@ -2094,7 +2220,7 @@ export function apply(ctx, config) {
         lines.push('', '挂 LoRA 出图时会按内容挑一篇并并进 prompt；想指定看哪篇，把 lora 传进来。')
         return { text: lines.join('\n') }
       }
-      const ranked = await rankLoraDocs(docs, lora)
+      const ranked = await rankLoraDocs(docs, lora, { maxChars })
       skipped.push(...ranked.skipped)
       const { chosen, mode } = chooseLoraDoc(ranked.candidates)
       const table = []
@@ -2106,9 +2232,13 @@ export function apply(ctx, config) {
         }
       }
       if (!chosen) {
+        const scanNote = ranked.stoppedBy === ''
+          ? []
+          : [`另有 ${ranked.notScanned.length} 篇没参与打分（${ranked.stoppedBy === 'limit' ? `超过 ${LORA_DOC_SCAN_LIMIT} 篇的上限` : `超过 ${Math.round(LORA_DOC_SCAN_BYTES / 1024 / 1024)} MB 的读取预算`}：${ranked.notScanned.slice(0, 3).join('、')}${ranked.notScanned.length > 3 ? ' …' : ''}）`]
         return {
           text: [`没挑到与「${lora}」相配的提示词文档（${ranked.scanned}/${ranked.total} 篇参与打分，门槛 ${LORA_DOC_STRONG_SCORE} 分）。`,
             ...table,
+            ...scanNote,
             '',
             '这时 comfy_run / comfy_review 什么都不并入。要么把 LoRA 名写进文档正文或标题，',
             '要么把提示词单独写成一串逗号分隔的 tag（这样的文档更容易被认出来）。'].join('\n'),
@@ -2132,13 +2262,48 @@ export function apply(ctx, config) {
       if (section.text.length === 0) {
         return { text: `${chosen.doc.name} 里没有可用的提示词内容（整篇都是空白）。` }
       }
+      const totalChars = Number.isInteger(section.totalChars) ? section.totalChars : section.text.length
+      const keptChars = Number.isInteger(section.keptChars) ? section.keptChars : section.text.length
+      const cutWord = CUT_WORDS[section.cut] ?? '边界'
+      if (args.rest === true) {
+        const { body } = promptBody(raw)
+        const trimmed = body.trim()
+        // keptChars 之后就是被收口掉的那一段。数量按原文算（正好等于 total - kept），
+        // 显示时才去掉开头的空行/分隔符 —— 否则正文第一行会是空的。
+        const restText = trimmed.slice(keptChars)
+        const restShown = restText.replace(/^[\s,，、;；]+/u, '')
+        if (restText.length === 0) {
+          return {
+            text: [
+              `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
+              `这篇没有剩余内容 —— 全篇 ${totalChars} 字都在上限 ${maxChars} 之内。`,
+            ].join('\n'),
+          }
+        }
+        return {
+          text: [
+            `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
+            `并进 prompt 的是前 ${keptChars} 字（上限 ${maxChars}，切在${cutWord}）；后面还剩 ${restText.length} 字没并：`,
+            '',
+            restShown,
+          ].join('\n'),
+        }
+      }
+      const sizeLine = section.truncated
+        ? `字数：并进 prompt ${keptChars} / 原文 ${totalChars} 字（上限 ${maxChars}，切在${cutWord}；余下 ${Math.max(0, totalChars - keptChars)} 字没并）`
+        : `字数：${totalChars} 字（全篇并进去了）`
+      const restHint = section.truncated
+        ? '想看被截掉的后半段传 rest:true；想看整篇原文传 full:true。'
+        : ''
       return {
         text: [
           `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
           ...table,
           '',
           section.heading ? `取的段落：${section.heading}` : '取的段落：全文（没找到「提示词 / Prompt」小标题）',
-          `字数：${section.text.length}${section.truncated ? '（原文更长，已截断）' : ''}`,
+          sizeLine,
+          ...(restHint ? [restHint] : []),
+          ...(skipped.length > 0 ? ['', '跳过的：', ...skipped.map((item) => `  ${item}`)] : []),
           '',
           section.text,
         ].join('\n'),
@@ -2216,9 +2381,10 @@ export function apply(ctx, config) {
         methods: ['GET'],
         requestBody: 'buffered',
         fetch: async () => {
-          const configured = readFeatureConfig(config).loraDocs.dir
+          const features = readFeatureConfig(config).loraDocs
+          const configured = features.dir
           if (configured.length === 0) {
-            return jsonResponse({ ok: true, dir: '', count: 0, promptish: 0, docs: [] })
+            return jsonResponse({ ok: true, dir: '', maxChars: features.maxChars, count: 0, promptish: 0, docs: [] })
           }
           try {
             const dir = resolveConfiguredDir(
@@ -2239,7 +2405,8 @@ export function apply(ctx, config) {
               let like = false
               try {
                 const raw = await readFile(doc.file, 'utf8')
-                const section = extractPromptSection(raw)
+                // 判定口径必须与出图时一致：用设置里的字数上限
+                const section = extractPromptSection(raw, { maxChars: features.maxChars })
                 like = looksLikePrompt(section.text.length > 0 ? section.text : raw)
               } catch {
                 like = false
@@ -2247,7 +2414,9 @@ export function apply(ctx, config) {
               if (like) promptish += 1
               docs.push({ name: doc.name, stem: doc.stem, key: doc.key, rel: doc.rel ?? doc.name, promptish: like })
             }
-            return jsonResponse({ ok: true, dir, count: docs.length, promptish, docs })
+            return jsonResponse({
+              ok: true, dir, maxChars: features.maxChars, count: docs.length, promptish, docs,
+            })
           } catch (error) {
             return jsonResponse({
               ok: false, dir: configured, error: explain(error), count: 0, promptish: 0, docs: [],
@@ -2332,6 +2501,8 @@ export function apply(ctx, config) {
                 + '文件名也不必与 LoRA 名对齐 —— comfy_run / comfy_review 挂 LoRA 时会读进来按内容打分（文件名像不像、正文提没提到、'
                 + '内容像不像提示词），挑最像的那篇把提示词段并进 prompt，并在结果里说明挑中了哪篇、为什么。'
                 + '没指定目录时什么都不读。想先看一眼用 comfy_lora_doc（给 lora 看打分表与那篇的内容，不给就列候选；full:true 看全文）。'
+                + '文档超过字数上限时按空行/换行/逗号边界截断（设置页可调 200–20000，默认 4000），'
+                + '结果里会写明原文多少字、并了多少字、切在什么边界；要看被截掉的后半段传 rest:true，要看整篇传 full:true。'
                 + '传 lora_doc:"off" 可以只对这一次跳过。',
               '1024×1024 在消费级显卡上单张通常要几十秒到两分钟，所以 comfy_result 要带 wait_seconds（单张 120，多张按张数加）。',
               '显存吃紧时 batch 保持 1；要腾地方用 comfy_control free_vram。',
