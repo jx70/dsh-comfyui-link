@@ -1,9 +1,10 @@
-﻿# dsh-comfyui-link 设计说明
+# dsh-comfyui-link 设计说明
 
 这份文档讲实现：**为什么是这么写的**，以及改代码前必须知道的边界。上手怎么用看 [README](../README.md)。
 
 - [三层结构](#三层结构)
-- [为什么审图模型必须由宿主开路由](#为什么审图模型必须由宿主开路由)
+- [为什么模型清单必须由宿主开路由](#为什么模型清单必须由宿主开路由)
+- [为什么「选择目录」要开一条 POST 路由，而且它会阻塞](#为什么选择目录要开一条-post-路由而且它会阻塞)
 - [工作流构造](#工作流构造)
 - [审图重生成的状态机](#审图重生成的状态机)
 - [volatile 字段与热生效](#volatile-字段与热生效)
@@ -16,10 +17,13 @@
 
 ```
 ┌───────────────────────────────────────────────┐
-│ client.js   浏览器半端（设置页那一页）          │
+│ client.js   浏览器半端（两处 UI）                │
 │   ctx.slots.register('settings.section')       │
+│   ctx.slots.register('conversation.input.left')│
 │   ctx.configForms.get('comfyui')               │
 │   fetch('/api/comfyui/vision-models')          │
+│   fetch('/api/comfyui/draw-models')            │
+│   POST('/api/comfyui/pick-directory')          │
 └───────────────────────┬───────────────────────┘
                         │ HTTP（带浏览器 cookie）
 ┌───────────────────────▼───────────────────────┐
@@ -27,7 +31,7 @@
 │   export const name / inject / Config          │
 │   ctx.tools.register(...) × 8                  │
 │   ctx.systemPrompt.section(...)                │
-│   ctx.connection.fetch.register(vision route)  │
+│   ctx.connection.fetch.register(vision+draw+pick)│
 └───────────────────────┬───────────────────────┘
                         │ fetch
 ┌───────────────────────▼───────────────────────┐
@@ -44,9 +48,11 @@
 - `index.js` 只负责「翻译成工具」，所有 HTTP 细节都下沉到 lib，工具函数体基本是线性的。
 - `client.js` 拿不到宿主服务（client 侧没有 `llm` / `tools`），所以它需要的一切数据都得由 host 侧开路由送过去。
 
-## 为什么审图模型必须由宿主开路由
+## 为什么模型清单必须由宿主开路由
 
 设置页要列「能看图的模型」，这份清单在宿主里（`llm.listProviders()` / `listModels()` / `resolveModelInfo()`）。但浏览器半端拿不到 `llm` 服务，只能让 host 侧开一条只读路由。
+
+输入框左侧的绘图控件要的是另一份清单：ComfyUI 的 `diffusion_models` / `text_encoders` / `vae` / `loras` 文件名。那份东西在 `client.modelIndex()` 里，浏览器同样拿不到（还要防 CORS），所以再开一条 `/api/comfyui/draw-models`，两条路由都是 `mountDataRoutes` 里同一个 `scope.effect` 注册的。
 
 **这条路由不能用 `webServer.register`。** DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面：
 
@@ -68,20 +74,50 @@
 ```js
 const connection = scope.connection ?? scope.get('connection')
 if (!connection || typeof connection.fetch?.register !== 'function') {
-  log('没有 connection.fetch，设置页的模型清单路由挂不上（审图模型改成跟随当前会话）')
+  log('没有 connection.fetch，模型清单路由挂不上（审图模型改成跟随当前会话）')
   return
 }
 scope.effect(() => connection.fetch.register({
   path: '/api/comfyui/vision-models',
   methods: ['GET'],
   requestBody: 'buffered',
-  fetch: handler,
+  fetch: visionHandler,
+}))
+scope.effect(() => connection.fetch.register({
+  path: '/api/comfyui/draw-models',
+  methods: ['GET'],
+  requestBody: 'buffered',
+  fetch: drawHandler,
+}))
+scope.effect(() => connection.fetch.register({
+  path: '/api/comfyui/pick-directory',
+  methods: ['POST'],
+  requestBody: 'buffered',
+  fetch: pickHandler,
 }))
 ```
 
 注册在栅栏**内部**，鉴权由栅栏自己做完，handler 只管数据。所以 handler 里不要再自己判 cookie。
 
-**降级路径**：没有 `connection`（旧版宿主、或者极简 ctx）时只记一行日志就返回，8 个工具照常注册。设置页的下拉框会取不到清单，退化成「跟随当前会话模型」。这条路径由 `test/registration.test.mjs` 里的「删掉 ctx.connection 后 routes 为空但 tools.size 仍 8」钉住。
+`/api/comfyui/draw-models` 与审图那条的区别：它读的是 ComfyUI 的模型列表，所以会真的打一次 `client.modelIndex()`。ComfyUI 没跑时返回 502 + `{ok:false,error,folders:{}}`，前端据此显示「读不到 ComfyUI 模型清单」，下拉退化成只剩「自动」一项 —— 不会因为 ComfyUI 掉线把整个输入框卡住。
+
+**降级路径**：没有 `connection`（旧版宿主、或者极简 ctx）时只记一行日志就返回，8 个工具照常注册。设置页的下拉框会取不到清单，退化成「跟随当前会话模型」，绘图控件的下拉也只剩「自动」，输出目录只能在 profile 的 `cordis.patch.yml` 里配。这条路径由 `test/registration.test.mjs` 里的「删掉 ctx.connection 后 routes 为空但 tools.size 仍 8」钉住。
+
+## 为什么「选择目录」要开一条 POST 路由，而且它会阻塞
+
+浏览器没有「弹系统文件夹选择框」的能力（`<input type="file" webkitdirectory>` 只能选**已有**文件、拿不到空目录，也拿不到绝对路径），所以这个动作只能由宿主代劳：页面发 `POST /api/comfyui/pick-directory` → 宿主 spawn 一个 `powershell.exe -STA` 弹 WinForms `FolderBrowserDialog` → 用户点完 → 子进程把路径写进临时文件 → 宿主读回来作为响应体返回。
+
+三个约束直接决定了实现形状：
+
+1. **路由必须是 POST**：`assertFetchRoute` 只检查「路径能被 `endpointFromPath('/api', …)` 解析」「methods 非空且不重复」，所以 `methods: ['POST']` 完全合法，不需要绕道 GET + 查询串。`connection` 只把方法匹配上的请求交给 handler，其余落到 404 —— 所以同一条路径用 GET 打是 404，这一点由 `probe:http` 钉住。
+2. **它会一直挂着**：`ShowDialog` 是模态循环，请求会开到用户点「确定」为止。宿主 webserver 没配 `requestTimeout` / `headersTimeout`（`dsh-host-webserver/lib/index.js` 里这三个词出现 0 次），所以不会被服务端掐断 —— 超时得插件自己兜（`PICK_TIMEOUT_MS = 180_000`，到点 `child.kill()` 并回 `{ok:false, reason:'timeout'}`）。同时用一个 `picking` 布尔挡连点：第二个请求立刻回 409，否则用户会被两个叠在一起的模态框困住。
+3. **路径不能走 stdout**：控制台代码页会把中文路径写坏（`D:\图片\输出` 直接变乱码），所以结果写进 `mkdtemp` 里一个 UTF-8 无 BOM 的临时文件再 `readFile`；临时目录在 `finally` 里删掉。同理，`-Command` / `-File` 都不能用 —— 外层 shell 会把 `$` 变量吃掉 —— 一律 `-EncodedCommand`（UTF-16LE → base64）。另外 powershell 的 stderr 默认是 CLIXML：脚本里先 `$ProgressPreference = 'SilentlyContinue'` 掐掉进度噪音，失败时再用 `parsePowerShellError()` 从 `<S S="Error">` 里还原正文（`_x000D_` 这类转义要手工解），否则用户看到的会是一段 XML。
+
+**选中的路径只进草稿。** 路由本身不写配置：它只回 `{ok:true, path}`，前端把它塞进 `draft`，跟改别的字段走完全同一条保存路径。这样「选择」不会产生一条绕过 `form.mutate` 的写入口，也就不会有人以为点一下按钮就改好了。
+
+**这一栏没有输入框。** 路径只能从系统对话框里挑（挑错了点「清除」，等于回到「图只留在 ComfyUI 的 output」）。所以 `output.dir` 的入口只有两个：原生对话框，或者直接改 profile 的 `cordis.patch.yml`。
+
+**非 Windows**：`powershellPath()` 返回 `''`，路由立刻回 `{ok:false, reason:'unsupported'}`，前端提示「这个平台没有系统文件夹选择框，输出目录在这里设不了」。没有手填框可以退，所以非 Windows 上改这一项只能去 profile 的 `cordis.patch.yml` 里写 `output.dir`。
 
 ## 工作流构造
 
@@ -162,13 +198,14 @@ comfy_review(prompt_id, requirement[, reference_prompt_id])
 │      ↓ false
 │   还有重试额度？ 否 → 结束，返回最后一轮
 │      ↓ 是
-│   用 new_prompt 重画（沿用底图尺寸与 LoRA 设置）
+│   用 new_prompt 重画（沿用底图尺寸、`draw.unet` 与 LoRA 设置）
 └── 第 1..maxAttempts 轮：同上
 ```
 
 几个实现细节：
 
 - **审图模型来自设置页**：`review.provider` / `review.model`，两个都留空则回退到当前会话的模型（`exec.agent.options`）。所以「审图模型」和「画图的模型」可以是两个不同的模型。
+- **重画用哪个扩散模型**：`draw.unet`（绘图控件选的那个）；没选就退回 `diffusion_models` 里第一个。这样「审图不满意 → 重画」出来的仍是同一风格，不会忽然换成文件夹里第一个模型。
 - **参考图不是要求的一部分**：`reference_prompt_id` 的图只是拿来比对的参照物，图里的内容（比如参考图是海边）不该被算进「必须还原」的要求里。提示词里明确写了这一点，否则模型会拿参考图的背景当要求。
 - **模型输出是 JSON**：`llm.stream()` 收 `text-delta` 拼起来再 `JSON.parse`。解析失败按「不满意 + 无新提示词」处理，不会崩。
 - **`maxAttempts` 的语义是「重画次数」**，不含首轮。所以 `maxAttempts=1` 最多出 2 张图（首图 + 1 次重画）。
@@ -180,8 +217,9 @@ export const Config = z.object({
   baseUrl: z.string().default('http://127.0.0.1:8188'),
   review: z.object({ enabled, provider, model, maxAttempts, extra }).volatile(),
   img2img: z.object({ enabled }).volatile(),
-  lora: z.object({ enabled }).volatile(),
+  draw: z.object({ unet: z.string(), lora: z.boolean() }).volatile(),
   upscale: z.object({ enabled }).volatile(),
+  output: z.object({ dir: z.string() }).volatile(),
 })
 ```
 
@@ -194,9 +232,11 @@ function unwrapVolatile(value) {
 }
 ```
 
-必须解包才能拿到当前值，否则拿到的是个对象、`enabled` 永远是 `undefined`。解包这一步是「设置页改了立即生效、不用重启」的全部机制 —— 每次工具调用时现读，所以改完下一次调用就生效。
+必须解包才能拿到当前值，否则拿到的是个对象、`enabled` 永远是 `undefined`。解包这一步是「设置页 / 对话栏改了立即生效、不用重启」的全部机制 —— 每次工具调用时现读，所以改完下一次调用就生效。
 
 `baseUrl` **没有** `.volatile()`：它是静态配置，改了要重载插件。设置页里也不显示它。
+
+反过来，宿主对**非 volatile 路径的写入一律抛错**（`Config field "..." is not volatile`），所以「页面上有这一项」等价于「Config 里必须给这一段声明 `.volatile()`」。
 
 ## 开关拦截
 
@@ -205,8 +245,10 @@ function unwrapVolatile(value) {
 | 开关 | 拦的是什么 | 报错 |
 | --- | --- | --- |
 | `img2img.enabled` | `comfy_run` 的 `mode="img2img"` | 提示去设置页开启 |
-| `lora.enabled` | `comfy_run` 的 `lora` 参数、`comfy_review` 的 `lora` 参数 | 同上 |
-| `upscale.enabled` | `comfy_upscale` 整个工具 | 同上 |
+| `draw.lora` | `comfy_run` 的 `lora` 参数、`comfy_review` 的 `lora` 参数 | 提示去**输入框左侧的绘图控件**打开 |
+| `upscale.enabled` | `comfy_upscale` 整个工具 | 提示去设置页开启 |
+
+`draw.lora` 与另外两个不同：它不在设置页，而在会话输入框左侧那颗胶囊上（只有绘图模式可见），因为它是**逐次出图的选择**，不是全局策略。`draw.unet` 同理 —— 它只是「省略 `unet` 时用哪个模型」，指定了也不冲突，所以不拦。
 
 报错文案统一带「开启」字样，`test/registration.test.mjs` 用 `/没开启|开启/` 匹配。这样做的原因：模型很容易顺手就调 `comfy_upscale`，如果等它跑到 HTTP 层才发现功能没开，报错会变成「连接失败」这种误导性的东西。
 
@@ -233,6 +275,29 @@ const saved = await attachments.saveImage({ bytes, mediaType, name })
 
 `render` 对空值、混垃圾输入必须稳（返回 `[{ type: 'text', text: '' }]` 或只保留合法块），因为它是最后一道渲染，抛异常会让整条消息渲染失败。
 
+### 输出目录：解析链与「默认不复制」
+
+要不要把图另存到用户指定的目录，由一条明确的优先级决定，三个取图入口（`comfy_result` / `comfy_review` / `comfy_upscale`）共用同一条链：
+
+```
+args.save_to  →  features.output.dir  →  ''（不复制）
+        ↓                 ↓
+   resolveOutputDir(wanted, comfyOutputRoot)
+        ↓
+   ''（留空）/ 绝对路径原样 / 相对路径 join 在 ComfyUI output 下
+        ↓
+   saveImageCopy(dir, image, bytes) → uniqueTarget → writeFile
+```
+
+四个约定：
+
+- **`output.dir` 留空时一行复制代码都不执行**。这是 1.2.0 的兼容边界：没配过这一栏的用户，行为与 1.1.0 完全一致，图只留在 ComfyUI 的 `output/`。
+- **绝对路径的判定不走 `path.isAbsolute`**。它在 Windows 与 Linux 上对 `X:/…` 的结论相反，而本仓库的 CI 与用户都可能跨平台。改用 `looksAbsolute`（盘符式 `^[A-Za-z]:[\\/]`、`startsWith('/')`、UNC `\\\\`），同一份配置在两个平台上判定一致。
+- **相对路径需要一个基准**，基准是 ComfyUI 自己的 output 目录（`deriveOutputRoot` 从 `/system_stats` 的启动参数里反推，`outputRoot` 配了就用配的）。基准认不出来时直接抛错、让人改绝对路径，而不是悄悄落到进程 CWD 里 —— 那会让「图存哪了」变成猜谜。
+- **复制失败不判工具失败**。图已经在 ComfyUI 那边落盘、也已经交回模型了，另存只是附带动作，所以只在文本里追加一行 `! 保存失败：…`。同理，同名文件不覆盖，`uniqueTarget` 依次试 `-1` / `-2`。
+
+**为什么不改 ComfyUI 的 `filename_prefix` 来做重定向**：`SaveImage` 的相对前缀由 ComfyUI 自己用 `os.path.join` 拼在它的 output 下，前缀写成绝对路径时的行为属于实现的偶然结果（不同版本不一定一致），而且这条路只能把图**搬走**、没法「多存一份」。在插件侧复制既跨版本稳定，也能同时满足「ComfyUI 那边还有一份」的预期。
+
 ## 失败模式与报错约定
 
 所有 HTTP / 图构造错误统一抛 `ComfyError`，带 `code` 区分来源：
@@ -257,6 +322,6 @@ const saved = await attachments.saveImage({ bytes, mediaType, name })
 | `comfy_status` / `comfy_models` / `comfy_node` | 数十毫秒 |
 | 512×512 / 4 步出图 | 约 3 秒 |
 | 1024×1024 / 30 步出图 | 几十秒到两分钟 |
-| `npm test`（64 条纯单测） | 约 1 秒 |
+| `npm test`（82 条纯单测） | 约 1 秒 |
 
 所以 `comfy_result` 的 `wait_seconds` 要按尺寸给：512 给 30 就够，1024 给 120，多张按张数加。显存吃紧时 batch 保持 1，要腾地方用 `comfy_control free_vram`。

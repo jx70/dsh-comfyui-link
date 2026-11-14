@@ -1,4 +1,4 @@
-﻿# 开发说明
+# 开发说明
 
 改这个插件之前先看一遍这份，能省掉大部分「改了没反应」「测试红了但不知道为啥」的时间。实现层的设计取舍看 [DESIGN.md](./DESIGN.md)，怎么用看 [README](../README.md)。
 
@@ -30,17 +30,19 @@ npm install
 
 ```
 .
-├── index.js                Host 插件：8 个工具 + 系统提示 + vision 路由 + Config
-├── client.js               浏览器半端：设置页那一页（settings.section 槽位）
+├── index.js                Host 插件：8 个工具 + 系统提示 + 两条只读路由 + Config
+├── client.js               浏览器半端：设置页（settings.section）+ 绘图控件（conversation.input.left）
 ├── lib/comfy.mjs           纯 HTTP 客户端 + 工作流构造（零宿主依赖）
-├── cordis.patch.yml        静态默认配置（baseUrl）
+├── cordis.patch.yml        静态默认配置（baseUrl）+ 「绘图模式」preset 声明
 ├── locale/{zh,en}.json     插件名与描述的本地化
 ├── icon.svg                设置页图标
 ├── test/
 │   ├── helpers/fake-ctx.mjs  假 ctx（tools / systemPrompt / connection / llm / attachments）
 │   ├── graph.test.mjs        工作流构造与 HTTP 客户端（22 条）
-│   ├── registration.test.mjs 注册形状与开关拦截（20 条）
-│   └── config.test.mjs       配置 schema + 去本地化守护 + 包名守护
+│   ├── registration.test.mjs 注册形状、开关拦截、三条路由、save_to（23 条）
+│   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护（24 条）
+│   ├── output.test.mjs       输出目录解析、重名不覆盖、复制落盘（4 条）
+│   └── picker.test.mjs       原生文件夹选择框的纯函数与 POST 路由（9 条）
 ├── scripts/
 │   ├── env.mjs               所有脚本的环境入口（唯一允许读环境变量的地方）
 │   ├── offline.mjs           假 ctx 冒烟
@@ -61,7 +63,7 @@ npm install
 ## 跑测试
 
 ```bash
-npm test          # 64 条纯单测，约 1 秒
+npm test          # 82 条纯单测，约 1 秒
 npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检查
 ```
 
@@ -71,6 +73,8 @@ npm run smoke     # 假 ctx 跑一遍 apply()，用宿主真 schema 校验器检
 node --test test/graph.test.mjs
 node --test test/registration.test.mjs
 node --test test/config.test.mjs
+node --test test/output.test.mjs
+node --test test/picker.test.mjs
 ```
 
 ### config.test.mjs 里的「去本地化守护」
@@ -98,7 +102,7 @@ node --test test/config.test.mjs
 | `npm run e2e` | ✓ | | | 真出图全链路（512×512 / 4 步） |
 | `npm run probe:route` | | | | 假 ctx 验「能看图的模型」筛选 |
 | `npm run probe:http` | | ✓ | ✓ | 真打路由：带 cookie 200 / 不带 401 / 不存在 404 |
-| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码 |
+| `npm run probe:bundle` | | ✓ | ✓ | 浏览器拿到的 client.js 里确有新代码（13 项标记） |
 | `npm run probe:features` | ✓ | | | template / img2img / LoRA / upscale + 开关拦截 |
 
 「需要凭据」的两个探针拿不到凭据时会**跳过并 exit 0**，所以别人的机器上跑它们不会红一片。
@@ -106,9 +110,9 @@ node --test test/config.test.mjs
 ### 探针各自钉的是什么
 
 - **`probe-route`**：给假 `llm` 三个 provider（两个能看图、一个纯文本），断言路由只留下能看图的模型、纯文本的被剔掉；再让 `llm` 抛异常，断言返回 500。它不碰网络，纯逻辑。
-- **`probe-http`**：真起一个 `Request` 打 `DSH_BASE` 上的路由。这条探针的价值在于**证明路由真的在信任栅栏内部** —— 如果哪天误改成 `webServer.register`，带 cookie 也不会是 200，这条会立刻红。
-- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言含 `ModelPicker` 与 `/api/comfyui/vision-models`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
-- **`probe-features`**：真出图。它会把 `index.js` import 两次（第二次带 `?off=<时间戳>` 绕开 ESM 缓存），一次全开关关着验拦截、一次开着验真跑。LoRA 段需要 `COMFY_LORA` 指定一个真实文件名，没设就跳过 —— 不能硬编码某个 LoRA 名，别人的机器上没有。
+- **`probe-http`**：真起一个 `Request` 打 `DSH_BASE` 上的路由。这条探针的价值在于**证明路由真的在信任栅栏内部** —— 如果哪天误改成 `webServer.register`，带 cookie 也不会是 200，这条会立刻红。它还顺带用「GET 打 pick-directory 得 404、POST 坏 JSON 得 400、POST 不带 cookie 得 401」钉住 POST 路由的方法匹配与鉴权，全程不弹窗。
+- **`probe:bundle`**：抓 DSH 首页 HTML，从里面找出 comfyui 的 client bundle URL，下载回来断言 13 项标记：`ModelPicker`、`DrawBar`、`data-comfy-select`、`/api/comfyui/vision-models`、`/api/comfyui/draw-models`、`/api/comfyui/pick-directory`、`conversation.input.left`、`data-comfy-btn`、`outputDirHint`、`data-comfy-path`、`data-comfy-clear`、`data-comfy-pick`，以及两件**必须已经消失**的东西 —— 设置页的 `loraHint`、输出目录手填框的 `data-comfy-inline`。它防的是「源码改了但浏览器加载的还是旧的」——客户端 bundle 有构建缓存，这条能立刻发现。
+- **`probe-features`**：真出图。它会把 `index.js` import 两次（第二次带 `?off=<时间戳>` 绕开 ESM 缓存），一次全开关关着验拦截、一次开着验真跑（开的是 `draw:{unet:'',lora:true}`，即对话栏那颗胶囊的等价配置）。LoRA 段需要 `COMFY_LORA` 指定一个真实文件名，没设就跳过 —— 不能硬编码某个 LoRA 名，别人的机器上没有。
 
 ## 环境变量
 
@@ -150,7 +154,9 @@ inputs: { model: [1, 0] }     // ❌ KeyError: 1
 
 ### volatile 字段是引用对象
 
-`.volatile()` 的字段在 `apply()` 里是 cosmokit 引用对象，必须 `.get()` 解包。忘了解包的表现是「设置页改了不生效」，而不是报错 —— 很难查，所以统一走 `unwrapVolatile()`。
+`.volatile()` 的字段在 `apply()` 里是 cosmokit 引用对象，必须 `.get()` 解包。忘了解包的表现是「设置页/对话栏改了不生效」，而不是报错 —— 很难查，所以统一走 `unwrapVolatile()`。
+
+反过来也要记住：**只有 volatile 字段写得进去**。宿主对非 volatile 路径直接抛 `Config field "..." is not volatile`，所以页面上新增一项控件时，`Config` 里那一段必须先加 `.volatile()`。
 
 ### 工具注册字段是白名单
 
@@ -163,9 +169,39 @@ presentCall  presentResult  projectContent  finalizeContent  deferLoading
 
 `scripts/offline.mjs` 会逐个工具检查这个白名单。
 
-### 设置页的模型清单不能用 webServer.register
+### 模型清单路由不能用 webServer.register
 
-DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面，自己挂会被外层前缀路由先吃掉，表现是永远 401。必须走 `ctx.connection.fetch.register`。详见 [DESIGN.md](./DESIGN.md#为什么审图模型必须由宿主开路由)。
+DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面，自己挂会被外层前缀路由先吃掉，表现是永远 401。必须走 `ctx.connection.fetch.register`（本插件有两条：`/api/comfyui/vision-models` 与 `/api/comfyui/draw-models`）。详见 [DESIGN.md](./DESIGN.md#为什么模型清单必须由宿主开路由)。
+
+### 对话栏控件的两个前提
+
+`conversation.input.left` 的组件能直接拿到标准 props `sessionId` / `useSessions`，所以判断「当前会话是不是绘图模式」照出厂 `AgentPresetLabel` 的写法读 `state.byId[sessionId].projectionValues.agentPreset` 即可，不用自己 inject 会话服务；自己的 `configForms` 句柄则靠注册处的 `inject: (sessionId) => ({...})` 透传（`InjectParams` 对 `scope: 'session'` 就是 `[sessionId]`）。
+
+另一个坑：`useSessions` 在会话摘要还没到达时会给 `undefined` 的 preset，这时别急着「不是绘图模式」直接 return —— 组件里做了一次向 `agent-preset-registry` 的默认预设回退，否则新建会话的头几帧控件会闪一下再出现。
+
+### preset 声明跟着包一起发
+
+「绘图模式」是 `cordis.patch.yml` 里的一条 `@deepseek-ai/dsh-agent-preset` insert。注意 **`config.plugins` 里的 `name` 必须写裸包名**（`@deepseek-ai/dsh-persona` 这类）：解析层的 `anchorInsertedPluginNames` 只改写顶层 insert 条目与 group 的 `config`，不会进 `config.plugins` 里重写相对路径。写裸包名时它们由 dsh 安装目录解析，插件自己的 `node_modules` 里不需要装这些包。
+
+### 原生文件夹选择框：三个坑
+
+「选择」按钮走 `POST /api/comfyui/pick-directory`，宿主 spawn 一个 `powershell.exe -STA` 弹 WinForms `FolderBrowserDialog`。这块的坑都是**踩出来的**，改之前先读一遍：
+
+- **不能用 `-Command` / `-File`**。外层 PowerShell 的引号处理会把脚本里的 `$` 变量吃掉，报 `ParserError: TerminatorExpectedAtEndOfString` / `ExpectedValueExpression`。一律 `-EncodedCommand`：`Buffer.from(script,'utf16le').toString('base64')`。
+- **`-STA` 是硬要求**。文件夹对话框是 COM + 模态循环，MTA 线程里直接异常。同时要用一个 1×1、`TopMost=$true`、`Opacity=0`、`ShowInTaskbar=$false` 的隐形 owner 调 `$dlg.ShowDialog($owner)`，否则对话框可能开在浏览器后面。
+- **路径不能走 stdout**。控制台代码页会把 `D:\图片\输出` 写坏；结果写进 `mkdtemp` 里的 UTF-8 无 BOM 文件（`UTF8Encoding($false)`）再 `readFile`，`finally` 删临时目录。同理也别在断言里比较 stdout 文本 —— 只看那个临时文件。
+- **stderr 默认是 CLIXML**。不关进度流，powershell 先往 stderr 吐一段 `<Objs>` 进度噪音（中文还是乱码），真正的错误被埋在后面的 `<S S="Error">boom_x000D__x000A_</S>` 里。所以脚本第一行就 `$ProgressPreference = 'SilentlyContinue'`，失败路径统一走 `parsePowerShellError()`（还原 `_x000D_` 转义、取第一条非续行）—— 别自己 `stderr.split('\n').slice(-1)`，那样拿到的是一条 XML 残片。
+
+另外两条契约：这条路由是**阻塞**的（`PICK_TIMEOUT_MS = 180_000` 自己兜，宿主 webserver 没配 `requestTimeout`），并且必须有 `picking` 布尔挡连点（第二个请求 409）。这些都由 `test/picker.test.mjs` 钉住；那个文件**不弹窗**，跑测试不会突然冒出对话框。
+
+还有一条**界面约定**：输出目录那一栏**没有输入框**，路径只能从对话框里挑（挑错了点「清除」）。所以别顺手把 `TextRow` 的 `action` 分支加回来 —— `probe:bundle` 里 `noInline: !includes('data-comfy-inline')` 会立刻红。非 Windows 上这一项只能在 profile 的 `cordis.patch.yml` 里写 `output.dir`。
+
+### 输出目录：三个纯函数 + 一条优先级
+
+`index.js` 导出了 `looksAbsolute` / `resolveOutputDir` / `uniqueTarget` / `saveImageCopy`，`test/output.test.mjs` 直接调它们，不需要 ComfyUI 也不需要临时宿主。改这块时守住两条：
+
+- **`output.dir` 留空必须完全不动作**（不建目录、不复制）。这是「没配过这一栏的用户行为与旧版本一致」的边界，`test/output.test.mjs` 有断言钉着。
+- **别换成 `path.isAbsolute`**。它在 Windows / Linux 上对 `X:/…` 结论相反，CI 两个平台都跑，会一边绿一边红。
 
 ### img2img 的底图要先上传
 

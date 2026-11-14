@@ -14,7 +14,10 @@
  * 所以插件在任何 profile 里都能加载，不会因为宿主树解析不到依赖而整个挂掉。
  * ============================================================================
  */
-import { mkdir, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { access, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import z from '@deepseek-ai/schemastery'
 import {
@@ -51,8 +54,14 @@ export const Config = z.object({
     extra: z.string().default('').description('额外审图要求，如「角色必须还原银色长发」'),
   }).volatile(),
   img2img: z.object({ enabled: z.boolean().default(false).description('开启图生图（comfy_run mode="img2img"）') }).volatile(),
-  lora: z.object({ enabled: z.boolean().default(false).description('开启 LoRA（comfy_run 的 lora 参数）') }).volatile(),
   upscale: z.object({ enabled: z.boolean().default(false).description('开启算法放大（comfy_upscale）') }).volatile(),
+  draw: z.object({
+    unet: z.string().default('').description('默认生图模型（diffusion_models 里的文件名）；留空用文件夹里第一个'),
+    lora: z.boolean().default(false).description('允许 comfy_run / comfy_review 挂 LoRA'),
+  }).volatile(),
+  output: z.object({
+    dir: z.string().default('').description('图片输出目录；绝对路径直接用，相对路径相对 ComfyUI 的 output；留空＝留在 ComfyUI 的 output'),
+  }).volatile(),
 })
 
 /** 默认配置；用户可以在 profile 的 patch 层覆盖（升级不丢） */
@@ -164,11 +173,14 @@ function unwrapVolatile(value) {
 
 /**
  * 读取当前功能开关（每次都现读 volatile 引用，热编辑即时生效）。
- * 默认：review/img2img/lora/upscale 全关闭。
- * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, lora:boolean, upscale:boolean}}
+ * 默认：review/img2img/upscale 全关闭；draw.unet 留空（用文件夹里第一个）、draw.lora 关闭；
+ * output.dir 留空（图就留在 ComfyUI 自己的 output 里，不额外复制）。
+ * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}}}
  */
 function readFeatureConfig(config) {
   const review = unwrapVolatile(config?.review) ?? {}
+  const draw = unwrapVolatile(config?.draw) ?? {}
+  const output = unwrapVolatile(config?.output) ?? {}
   return {
     review: {
       enabled: review.enabled === true,
@@ -178,8 +190,14 @@ function readFeatureConfig(config) {
       extra: typeof review.extra === 'string' ? review.extra : '',
     },
     img2img: (unwrapVolatile(config?.img2img) ?? {}).enabled === true,
-    lora: (unwrapVolatile(config?.lora) ?? {}).enabled === true,
     upscale: (unwrapVolatile(config?.upscale) ?? {}).enabled === true,
+    draw: {
+      unet: typeof draw.unet === 'string' ? draw.unet : '',
+      lora: draw.lora === true,
+    },
+    output: {
+      dir: typeof output.dir === 'string' ? output.dir.trim() : '',
+    },
   }
 }
 
@@ -217,7 +235,258 @@ function deriveOutputRoot(stats) {
   return dir ? join(dir, 'output') : ''
 }
 
+/**
+ * 判断「看起来是绝对路径」——**故意不用 path.isAbsolute**。
+ * path.isAbsolute 跟平台走：同一份配置 `X:\pics` 在 Windows 上为真、在 Linux 上为假，
+ * 会让同一个设置在两台机器上落到完全不同的地方，双平台的 CI 也会给出相反结论。
+ * 这里按写法判断：盘符开头 / UNC 开头 / POSIX 根开头，三者任一即视为绝对。
+ */
+export function looksAbsolute(p) {
+  const value = typeof p === 'string' ? p.trim() : ''
+  if (value.length === 0) return false
+  return /^[A-Za-z]:[\\/]/.test(value) || value.startsWith('/') || value.startsWith('\\\\')
+}
+
+/**
+ * 把「配置里的输出目录」解析成最终目录。
+ * - 空 → ''（不复制，图留在 ComfyUI 自己的 output 里）
+ * - 绝对 → 原样
+ * - 相对 + 知道 ComfyUI 的 output 根 → 拼在它下面
+ * - 相对 + 不知道根 → 报错（否则会把图写到进程 cwd 里，用户根本找不到）
+ */
+export function resolveOutputDir(configured, comfyRoot) {
+  const raw = typeof configured === 'string' ? configured.trim() : ''
+  if (raw.length === 0) return ''
+  if (looksAbsolute(raw)) return raw
+  const root = typeof comfyRoot === 'string' ? comfyRoot.trim() : ''
+  if (root.length === 0) {
+    throw new Error(
+      '输出目录写的是相对路径，但认不出 ComfyUI 的 output 目录在哪。'
+      + '改成绝对路径，或用 save_to 直接给绝对路径。',
+    )
+  }
+  return join(root.replace(/[\\/]+$/, ''), raw)
+}
+
+/**
+ * 给目标文件找一个不撞名的位置：同名已存在就依次试 -1、-2…
+ * 不覆盖用户已有的文件（出图是幂等的，覆盖反而丢东西）。
+ */
+export async function uniqueTarget(dir, filename) {
+  const name = String(filename || 'image.png').replace(/[\\/]+$/, '') || 'image.png'
+  const dot = name.lastIndexOf('.')
+  const stem = dot > 0 ? name.slice(0, dot) : name
+  const ext = dot > 0 ? name.slice(dot) : ''
+  for (let n = 0; n < 1000; n += 1) {
+    const candidate = join(dir, n === 0 ? name : `${stem}-${n}${ext}`)
+    try {
+      await access(candidate)
+    } catch {
+      return candidate
+    }
+  }
+  return join(dir, `${stem}-${Date.now()}${ext}`)
+}
+
+/**
+ * 把一张图的字节写到目标目录（目录不存在就建）。
+ * dir 为空时什么都不做、返回 '' —— 「没配输出目录」时这一整条路径都走不到。
+ */
+export async function saveImageCopy(dir, image, bytes) {
+  const target0 = typeof dir === 'string' ? dir.trim() : ''
+  if (target0.length === 0) return ''
+  if (!bytes || bytes.length === 0) return ''
+  await mkdir(target0, { recursive: true })
+  const target = await uniqueTarget(target0, image?.filename || 'image.png')
+  await writeFile(target, bytes)
+  return target
+}
+
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
+
+// ── 原生文件夹选择框 ──────────────────────────────────────────────────────
+// 这一节全部是纯函数（除了 pickDirectory），方便单测在不弹窗的前提下覆盖。
+
+/**
+ * 找 Windows PowerShell 的可执行文件。
+ * 非 Windows 返回 ''（调用方据此走「这个平台没有对话框」分支）。
+ * 32 位 node 跑在 64 位 Windows 上时 System32 会被重定向到 SysWOW64，
+ * 那里没有 WindowsPowerShell，所以要再试一次 Sysnative。
+ */
+export function powershellPath() {
+  if (process.platform !== 'win32') return ''
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
+  const candidates = [
+    join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    join(root, 'Sysnative', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+  ]
+  for (const candidate of candidates) {
+    try {
+      if (existsSync(candidate)) return candidate
+    } catch { /* 忽略：权限之类的问题就当下一个候选 */ }
+  }
+  // 都没找到也交给 spawn 去试裸名，让 ENOENT 变成一条可读的失败原因
+  return 'powershell.exe'
+}
+
+/**
+ * PowerShell 单引号字面量转义：内部每个 ' 写成 ''。
+ * 传路径/标题进脚本一律走这个，别用双引号（$ 会被外层吃掉）。
+ */
+export function quotePowerShell(value) {
+  return "'" + String(value ?? '').replace(/'/g, "''") + "'"
+}
+
+/**
+ * 生成「弹一个文件夹选择框，把结果写进临时文件」的 PowerShell 脚本。
+ * 要点：
+ *   - 必须 -STA（文件夹对话框是 COM + 模态循环）；
+ *   - 用一个 1×1、TopMost、Opacity=0 的隐形 owner 保证对话框在浏览器前面弹出；
+ *   - 结果写 UTF-8（无 BOM）临时文件，不走 stdout（代码页会写坏中文）。
+ */
+export function buildPickerScript({ tempFile, title = PICKER_TITLE, initial = '' } = {}) {
+  const lines = [
+    "$ErrorActionPreference = 'Stop'",
+    // 不关掉进度流的话，powershell 会往 stderr 吐一大段 CLIXML 进度噪音
+    "$ProgressPreference = 'SilentlyContinue'",
+    '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+    'Add-Type -AssemblyName System.Windows.Forms',
+    'Add-Type -AssemblyName System.Drawing',
+    '$owner = New-Object System.Windows.Forms.Form',
+    '$owner.TopMost = $true',
+    '$owner.ShowInTaskbar = $false',
+    '$owner.FormBorderStyle = "None"',
+    '$owner.Size = New-Object System.Drawing.Size(1, 1)',
+    '$owner.StartPosition = "CenterScreen"',
+    '$owner.Opacity = 0',
+    '$owner.Show()',
+    '$dlg = New-Object System.Windows.Forms.FolderBrowserDialog',
+    `$dlg.Description = ${quotePowerShell(title)}`,
+    '$dlg.ShowNewFolderButton = $true',
+  ]
+  if (typeof initial === 'string' && initial.trim().length > 0) {
+    lines.push(`$dlg.SelectedPath = ${quotePowerShell(initial.trim())}`)
+  }
+  lines.push(
+    '$result = $dlg.ShowDialog($owner)',
+    'if ($result -eq [System.Windows.Forms.DialogResult]::OK) {',
+    "  $text = 'OK' + [char]10 + $dlg.SelectedPath",
+    '} else {',
+    "  $text = 'CANCEL'",
+    '}',
+    `[System.IO.File]::WriteAllText(${quotePowerShell(tempFile)}, $text, (New-Object System.Text.UTF8Encoding($false)))`,
+    '$dlg.Dispose()',
+    '$owner.Close()',
+  )
+  return lines.join('\r\n')
+}
+
+/**
+ * 解析子进程写回来的文本：首行 OK/CANCEL，OK 时第二行起是路径。
+ * 任何认不出的内容都当「取消」——宁可什么都不改，也不要把乱码写进配置。
+ */
+export function parsePickedText(text) {
+  const raw = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
+  const cut = raw.indexOf('\n')
+  const head = (cut < 0 ? raw : raw.slice(0, cut)).trim().toUpperCase()
+  if (head !== 'OK') return { cancelled: true, path: '' }
+  const path = (cut < 0 ? '' : raw.slice(cut + 1)).replace(/\r/g, '').trim()
+  if (path.length === 0) return { cancelled: true, path: '' }
+  return { cancelled: false, path }
+}
+
+/**
+ * 从 powershell 的 stderr 里挖出一条人能读的错误。
+ * stderr 默认是 CLIXML（`#< CLIXML` + `<Objs>`），错误正文在 `<S S="Error">` 里，
+ * 而且换行/制表被转义成 `_x000D_` 这类占位；不是 CLIXML 时退化成取最后一行。
+ */
+export function parsePowerShellError(text) {
+  const raw = typeof text === 'string' ? text : ''
+  if (raw.trim().length === 0) return ''
+  const decode = (s) => s
+    .replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/\r/g, '')
+    .trim()
+  if (raw.includes('<Objs')) {
+    const entries = [...raw.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)].map((m) => decode(m[1]))
+    const first = entries.find((line) => line.length > 0 && !line.startsWith('+') && !line.startsWith(' '))
+    if (first) return first
+    if (entries.length > 0) return entries[0]
+  }
+  const lines = decode(raw).split('\n').map((line) => line.trim()).filter(Boolean)
+  const useful = lines.filter((line) => line !== '#< CLIXML' && !line.startsWith('<') && !line.startsWith('+'))
+  return useful.slice(-1)[0] ?? ''
+}
+
+/**
+ * 弹一次原生文件夹选择框，等用户点完（或超时）。
+ * @returns {Promise<{ok:true, path:string} | {ok:false, cancelled:true} | {ok:false, reason:string, error?:string}>}
+ */
+async function pickDirectory({ initial = '' } = {}) {
+  const exe = powershellPath()
+  if (!exe) return { ok: false, reason: 'unsupported' }
+
+  let workDir = ''
+  try {
+    workDir = await mkdtemp(join(tmpdir(), 'dsh-comfyui-pick-'))
+  } catch (error) {
+    return { ok: false, reason: 'failed', error: explain(error) }
+  }
+  const tempFile = join(workDir, 'picked.txt')
+  try {
+    const script = buildPickerScript({ tempFile, initial })
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    const child = spawn(
+      exe,
+      ['-NoProfile', '-NonInteractive', '-STA', '-WindowStyle', 'Hidden', '-EncodedCommand', encoded],
+      { windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] },
+    )
+    let stderr = ''
+    child.stderr?.on('data', (chunk) => {
+      if (stderr.length < 2048) stderr += String(chunk)
+    })
+
+    const exit = await new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        try { child.kill() } catch { /* 已经退了 */ }
+        resolve({ timedOut: true })
+      }, PICK_TIMEOUT_MS)
+      child.once('error', (error) => {
+        clearTimeout(timer)
+        resolve({ error })
+      })
+      child.once('close', (code) => {
+        clearTimeout(timer)
+        resolve({ code })
+      })
+    })
+    if (exit.timedOut) return { ok: false, reason: 'timeout' }
+    if (exit.error) return { ok: false, reason: 'failed', error: explain(exit.error) }
+
+    let text = ''
+    try {
+      text = await readFile(tempFile, 'utf8')
+    } catch {
+      // 没有结果文件：多半是 powershell 起不来或策略拦了
+      const detail = parsePowerShellError(stderr)
+      return { ok: false, reason: 'failed', error: detail || `对话框进程退出码 ${exit.code}` }
+    }
+    const parsed = parsePickedText(text)
+    if (parsed.cancelled) return { ok: false, cancelled: true }
+    try {
+      const info = await stat(parsed.path)
+      if (!info.isDirectory()) return { ok: false, reason: 'failed', error: '选中的不是目录' }
+    } catch (error) {
+      return { ok: false, reason: 'failed', error: explain(error) }
+    }
+    return { ok: true, path: parsed.path }
+  } catch (error) {
+    return { ok: false, reason: 'failed', error: explain(error) }
+  } finally {
+    try { await rm(workDir, { recursive: true, force: true }) } catch { /* 临时目录清不掉不算失败 */ }
+  }
+}
+
 
 // ── 设置页用的只读路由 ────────────────────────────────────────────────────
 // 浏览器半端拿不到宿主服务（client 侧没有 llm），所以「列出能看图的模型」得由
@@ -232,6 +501,27 @@ const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
 /** 路由路径：GET /api/comfyui/vision-models */
 const VISION_ROUTE = '/api/comfyui/vision-models'
+
+/** 路由路径：GET /api/comfyui/draw-models（对话栏「生图模型」下拉的数据源） */
+const DRAW_ROUTE = '/api/comfyui/draw-models'
+
+// ── 唯一一条会「等用户点按钮」的路由 ──────────────────────────────────────
+// 设置页的「选择」按钮要弹的是**系统原生**文件夹选择框，而原生对话框只能开在
+// 交互式会话里（宿主的 node 进程自己没有桌面），所以这里 spawn 一个
+// powershell.exe -STA 去开 WinForms 的 FolderBrowserDialog，等它退出再回话。
+//
+// 宿主 webserver 没有配 requestTimeout / headersTimeout，所以这条请求不会被
+// 服务器掐断；超时由插件自己兜（PICK_TIMEOUT_MS）。
+//
+// 路径不能靠 stdout 回传：Windows PowerShell 的控制台代码页会把中文写成乱码。
+// 一律让子进程把结果写进 UTF-8 临时文件，宿主读完再删。
+const PICK_ROUTE = '/api/comfyui/pick-directory'
+
+/** 一次「选择目录」最多等多久（毫秒） */
+const PICK_TIMEOUT_MS = 180_000
+
+/** 对话框标题 */
+const PICKER_TITLE = '选择图片输出目录'
 
 /** 统一的 JSON 响应（禁缓存：模型清单会随 provider 变化）。 */
 function jsonResponse(payload, status = 200) {
@@ -457,8 +747,8 @@ export function apply(ctx, config) {
     if (job?.status === 'failed') {
       throw new Error(`重生成任务 ${promptId} 失败了（可能是显存不够，用 comfy_status 看）`)
     }
-    const { ref, image } = await fetchImageRef(promptId, signal)
-    return { promptId, ref, filename: image.filename }
+    const { ref, image, bytes, mediaType } = await fetchImageRef(promptId, signal)
+    return { promptId, ref, filename: image.filename, image, bytes, mediaType }
   }
 
   // ── 1. comfy_status ────────────────────────────────────────────────────
@@ -638,7 +928,7 @@ export function apply(ctx, config) {
     description:
       '把一张工作流提交给 ComfyUI 排队，立刻返回 prompt_id。三种用法：\n'
       + '· mode="template"（默认）：内置文生图 —— 加载模型 → 正负提示词 → 采样 → 解码 → 存图。'
-      + '只要写 prompt，可选 lora / lora_strength 挂角色 LoRA。\n'
+      + '只要写 prompt；unet 省略时用对话栏左侧选的生图模型，也可以在对话栏打开 LoRA 后传 lora / lora_strength。\n'
       + '· mode="img2img"：基于一张已有图重绘（先在设置页开启）。给 image_prompt_id（之前出图的 prompt_id），'
       + 'denoise 控制改动幅度（越小越贴近原图）。\n'
       + '· mode="graph"：传自己的 API 格式工作流 { "节点id": { class_type, inputs } }。\n'
@@ -655,10 +945,10 @@ export function apply(ctx, config) {
       seed: i('随机种子，默认随机。想复现同一张图就传同一个值'),
       sampler: s('采样器，默认 euler；可选值查 comfy_node KSampler'),
       scheduler: s('调度器，默认 simple；可选值查 comfy_node KSampler'),
-      unet: s('扩散模型文件名，省略用 diffusion_models 里第一个'),
+      unet: s('扩散模型文件名；省略则用对话栏左侧选中的生图模型（还没选就用 diffusion_models 里第一个）'),
       clip: s('文本编码器文件名，省略用 text_encoders 里第一个'),
       vae: s('VAE 文件名，省略用 vae 里第一个'),
-      lora: s('LoRA 文件名（template 模式，需在设置页开启 lora）。用 comfy_models 查 loras 文件夹'),
+      lora: s('LoRA 文件名（template 模式）。要先在对话栏左侧把 LoRA 开关打开；文件名用 comfy_models 查 loras 文件夹'),
       lora_strength: n('LoRA 强度，默认 0.8'),
       image_prompt_id: s('img2img 模式的底图来源：之前出图的 prompt_id'),
       denoise: n('img2img 的 denoise，默认 0.6。越小越贴近原图，越大改得越狠'),
@@ -697,12 +987,16 @@ export function apply(ctx, config) {
           if (!args.image_prompt_id) {
             throw new Error('mode="img2img" 必须给 image_prompt_id（底图来源，之前出图的 prompt_id）')
           }
-        } else if (args.lora && !features.lora) {
-          throw new Error('LoRA 没开启，请在插件设置页把「lora」开关打开。')
+        } else if (args.lora && !features.draw.lora) {
+          throw new Error('LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
         }
 
         const index = await client.modelIndex({ signal })
-        const models = resolveModels(index, { unet: args.unet, clip: args.clip, vae: args.vae })
+        const models = resolveModels(index, {
+          unet: args.unet || features.draw.unet || undefined,
+          clip: args.clip,
+          vae: args.vae,
+        })
 
         if (mode === 'img2img') {
           const { bytes } = await fetchImageRef(args.image_prompt_id, signal)
@@ -781,6 +1075,11 @@ export function apply(ctx, config) {
         lines.push(`提示词写进了节点 ${injectedNode}`)
       }
       lines.push('')
+      lines.push(`输出目录：${
+        features.output.dir
+          ? `${features.output.dir}（comfy_result / comfy_review / comfy_upscale 会把图存到这里）`
+          : 'ComfyUI 自己的 output（设置页没指定输出目录）'
+      }`)
       lines.push('拿结果用 comfy_result（传这个 prompt_id 和 wait_seconds）。1024×1024 单张通常几十秒起，按自己机器的速度给等待时间。')
       return { text: lines.join('\n') }
     },
@@ -792,22 +1091,24 @@ export function apply(ctx, config) {
     description:
       '等一个任务跑完，然后取回它的输出图。'
       + '给了 wait_seconds 就一直等到跑完或等够那么久，不给就只看当前状态。'
-      + '图会以图片形式交给模型看，同时报出磁盘上的路径；给 save_to 还会另存一份。',
+      + '图会以图片形式交给模型看，同时报出磁盘上的路径；保存目录省略时用设置页配的那个。',
     parameters: params({
       prompt_id: s('comfy_run 返回的 prompt_id'),
       wait_seconds: i('最多等多少秒，0 表示不等待只看状态。1024×1024 单张常见 60–120 秒，多张按张数加'),
       max_images: i('最多取回几张，默认 4，最多 12'),
       show_images: { type: 'boolean', description: '是否把图交给模型看，默认 true；只想看路径和状态就传 false' },
-      save_to: s('把图另存到这个目录（会自己建目录）。不给就只报 ComfyUI 那边的原有路径'),
+      save_to: s('把图另存到这个目录（会自己建目录）。省略就用设置页配的输出目录；两边都空就只报 ComfyUI 那边的原有路径'),
     }, ['prompt_id']),
     output: output(),
     timeoutMs: settings.maxWaitSeconds * 1000 + 120_000,
     async execute(args, exec) {
       const signal = exec.signal
+      const features = readFeatureConfig(config)
       const waitSeconds = Math.max(0, Math.min(args.wait_seconds ?? 0, settings.maxWaitSeconds))
       const maxImages = Math.max(1, Math.min(12, args.max_images ?? 4))
       const wantImages = args.show_images !== false
-      const saveTo = typeof args.save_to === 'string' && args.save_to.length > 0 ? args.save_to : ''
+      const requested = typeof args.save_to === 'string' ? args.save_to.trim() : ''
+      const wanted = requested || features.output.dir
 
       const started = Date.now()
       const deadline = started + waitSeconds * 1000
@@ -860,11 +1161,12 @@ export function apply(ctx, config) {
       }
 
       const saved = []
-      if (saveTo) {
+      let saveTo = ''
+      if (wanted.length > 0) {
         try {
-          await mkdir(saveTo, { recursive: true })
+          saveTo = resolveOutputDir(wanted, await resolvedOutputRoot(signal))
         } catch (error) {
-          lines.push(`另存目录建不出来（${saveTo}）：${error?.message ?? error}`)
+          lines.push(`另存目录不可用（${wanted}）：${error?.message ?? error}`)
         }
       }
 
@@ -891,12 +1193,13 @@ export function apply(ctx, config) {
 
         if (saveTo) {
           try {
-            const target = join(saveTo, image.filename)
-            await writeFile(target, bytes)
-            saved.push(target)
-            lines.push(`    另存 ${target}`)
+            const target = await saveImageCopy(saveTo, image, bytes)
+            if (target) {
+              saved.push(target)
+              lines.push(`    已保存 ${target}`)
+            }
           } catch (error) {
-            lines.push(`    ! 另存失败：${error?.message ?? error}`)
+            lines.push(`    ! 保存失败：${error?.message ?? error}`)
           }
         }
 
@@ -987,8 +1290,9 @@ export function apply(ctx, config) {
       requirement: s('用户最初的要求，审图就按这个判'),
       reference_prompt_id: s('角色参考图来源：之前出图的 prompt_id。给了就把它一并交给审图模型，用来比对角色是否还原'),
       max_attempts: i('最多重生成几次（不含首次），省略用设置页里的值'),
-      lora: s('重画时挂的角色 LoRA 文件名（需在设置页开启 lora）。留空则不带 LoRA'),
+      lora: s('重画时挂的角色 LoRA 文件名（要先在输入框左侧的绘图控件里把 LoRA 打开）。留空则不带 LoRA'),
       lora_strength: n('LoRA 强度，默认 0.8'),
+      save_to: s('把最终那张图另存到这个目录（会自己建目录）。省略就用设置页配的输出目录；两边都空就不额外复制'),
     }, ['prompt_id', 'requirement']),
     output: output(),
     timeoutMs: settings.maxWaitSeconds * 1000 + 600_000,
@@ -1018,8 +1322,8 @@ export function apply(ctx, config) {
         return { width: 1024, height: 1024 }
       })()
       const lora = args.lora
-      if (lora && !features.lora) {
-        throw new Error('LoRA 没开启，请在插件设置页把「lora」开关打开。')
+      if (lora && !features.draw.lora) {
+        throw new Error('LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
       }
       const reviewLog = []
 
@@ -1051,7 +1355,7 @@ export function apply(ctx, config) {
           ? verdict.newPrompt
           : `${args.requirement}${verdict.feedback ? `（修正：${verdict.feedback}）` : ''}`
         const index = await client.modelIndex({ signal })
-        const models = resolveModels(index, {})
+        const models = resolveModels(index, { unet: features.draw.unet || undefined })
         const graph = buildTxt2Img({
           unet: models.unet,
           clip: models.clip,
@@ -1085,6 +1389,20 @@ export function apply(ctx, config) {
         if (item.new_prompt) lines.push(`  重画提示词：${item.new_prompt}`)
       }
       if (!satisfied) lines.push(`\n已达到最大重试 ${maxAttempts} 次，下面是最后一次的图。`)
+
+      // 只复制最终那张（被否掉的草稿不落地），目录取值与 comfy_result 一致
+      const requested = typeof args.save_to === 'string' ? args.save_to.trim() : ''
+      const wanted = requested || features.output.dir
+      if (wanted.length > 0) {
+        try {
+          const dir = resolveOutputDir(wanted, await resolvedOutputRoot(signal))
+          const target = await saveImageCopy(dir, current.image, current.bytes)
+          if (target) lines.push(`已保存 ${target}`)
+        } catch (error) {
+          lines.push(`! 保存失败：${error?.message ?? error}`)
+        }
+      }
+
       return { text: lines.join('\n'), images: [current.ref] }
     },
   })
@@ -1100,6 +1418,7 @@ export function apply(ctx, config) {
       width: i('目标宽，正整数'),
       height: i('目标高，正整数'),
       method: { type: 'string', enum: ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos'], description: '放大算法，默认 lanczos' },
+      save_to: s('把放大后的图另存到这个目录（会自己建目录）。省略就用设置页配的输出目录；两边都空就不额外复制'),
     }, ['image_prompt_id', 'width', 'height']),
     output: output(),
     timeoutMs: settings.maxWaitSeconds * 1000 + 120_000,
@@ -1118,26 +1437,35 @@ export function apply(ctx, config) {
         method: args.method ?? 'lanczos',
         filenamePrefix: 'dsh/upscale',
       })
-      const { ref, filename } = await submitAndFetch(graph, signal)
-      return {
-        text: `已放大到 ${args.width}×${args.height}（${args.method ?? 'lanczos'}）。\n输出：${filename}`,
-        images: [ref],
+      const { ref, filename, image, bytes: outBytes } = await submitAndFetch(graph, signal)
+      const lines = [`已放大到 ${args.width}×${args.height}（${args.method ?? 'lanczos'}）。`, `输出：${filename}`]
+      const requested = typeof args.save_to === 'string' ? args.save_to.trim() : ''
+      const wanted = requested || features.output.dir
+      if (wanted.length > 0) {
+        try {
+          const dir = resolveOutputDir(wanted, await resolvedOutputRoot(signal))
+          const target = await saveImageCopy(dir, image, outBytes)
+          if (target) lines.push(`已保存 ${target}`)
+        } catch (error) {
+          lines.push(`! 保存失败：${error?.message ?? error}`)
+        }
       }
+      return { text: lines.join('\n'), images: [ref] }
     },
   })
 
-  // ── 设置页用的只读路由：列出能看图的模型 ────────────────────────────────
-  // 浏览器半端没有 llm 服务（client 侧只有 slots/locale/configForms 等），
-  // 所以「设置页里选出审图模型」必须由宿主开一条只读路由给它取。
+  // ── 只读路由：设置页的审图模型清单 + 对话栏的生图模型清单 ──────────────
+  // 浏览器半端没有 llm 服务、也没有 comfy 客户端（client 侧只有
+  // slots/locale/configForms 等），所以这两份清单必须由宿主开只读路由给它取。
   // connection.fetch 已自带鉴权（栅栏内的 admit），这里只管数据。
-  const mountVisionRoute = (scope) => {
+  const mountDataRoutes = (scope) => {
     const log = (msg) => {
       try { scope.logger('comfyui').info(msg) } catch { /* 忽略 */ }
     }
     const connection = scope.connection
       ?? (typeof scope.get === 'function' ? scope.get('connection') : undefined)
     if (!connection || typeof connection.fetch?.register !== 'function') {
-      log('没有 connection.fetch，设置页的模型清单路由挂不上（审图模型改成跟随当前会话）')
+      log('没有 connection.fetch，模型清单路由挂不上（审图模型改成跟随当前会话，生图模型只能手填，输出目录只能在 profile 里配）')
       return
     }
     try {
@@ -1159,14 +1487,80 @@ export function apply(ctx, config) {
         },
       }), 'comfyui: /api/comfyui/vision-models 路由')
     } catch (error) {
-      log(`HTTP 路由没挂上：${error?.message ?? error}`)
+      log(`审图模型路由没挂上：${error?.message ?? error}`)
+    }
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: DRAW_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async () => {
+          try {
+            const index = await client.modelIndex({ signal: AbortSignal.timeout(settings.timeoutMs) })
+            return jsonResponse({
+              ok: true,
+              folders: {
+                diffusion_models: index.diffusion_models ?? [],
+                text_encoders: index.text_encoders ?? [],
+                vae: index.vae ?? [],
+                loras: index.loras ?? [],
+              },
+            })
+          } catch (error) {
+            // ComfyUI 没起 / 超时：给前端一份空清单 + 原因，让它退回「自动」
+            return jsonResponse({ ok: false, error: explain(error), folders: {} }, 502)
+          }
+        },
+      }), 'comfyui: /api/comfyui/draw-models 路由')
+    } catch (error) {
+      log(`生图模型路由没挂上：${error?.message ?? error}`)
+    }
+    // ── 唯一一条会写、也会阻塞的路由：弹原生文件夹选择框 ────────────────
+    // 它只回传「用户点了哪个目录」，不落盘；写配置仍然走设置页的「保存」。
+    // 连点两次会被 picking 挡住（第一次没关之前第二个框会把用户搞懵）。
+    let picking = false
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: PICK_ROUTE,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          if (picking) {
+            return jsonResponse({ ok: false, reason: 'busy', error: '已经有一个选择框开着' }, 409)
+          }
+          let payload = {}
+          try {
+            const text = await request.text()
+            if (text.trim().length > 0) {
+              const parsed = JSON.parse(text)
+              if (parsed && typeof parsed === 'object') payload = parsed
+            }
+          } catch {
+            return jsonResponse({ ok: false, reason: 'bad-request', error: '请求体要是 JSON' }, 400)
+          }
+          const initial = typeof payload.initial === 'string' ? payload.initial.trim().slice(0, 512) : ''
+          picking = true
+          try {
+            const result = await pickDirectory({ initial })
+            if (result.ok === true) return jsonResponse({ ok: true, path: result.path })
+            if (result.cancelled === true) return jsonResponse({ ok: false, cancelled: true })
+            return jsonResponse({ ok: false, reason: result.reason ?? 'failed', error: result.error ?? '' })
+          } catch (error) {
+            return jsonResponse({ ok: false, reason: 'failed', error: explain(error) }, 500)
+          } finally {
+            picking = false
+          }
+        },
+      }), 'comfyui: /api/comfyui/pick-directory 路由')
+    } catch (error) {
+      log(`选择目录路由没挂上（输出目录只能在 profile 里配）：${error?.message ?? error}`)
     }
   }
   if (typeof ctx.inject === 'function') {
-    ctx.inject(['connection'], mountVisionRoute)
+    ctx.inject(['connection'], mountDataRoutes)
   } else {
     // 极简 ctx（离线冒烟测试）走这一支；没有 connection 就静静地跳过
-    mountVisionRoute(ctx)
+    mountDataRoutes(ctx)
   }
 
   // ── 给模型的一段说明（这个 profile 里没这些工具时自动空着） ───────────
@@ -1181,10 +1575,13 @@ export function apply(ctx, config) {
               '# ComfyUI',
               `本机 ComfyUI 在 ${where()}。出图流程：comfy_run 提交（拿 prompt_id）→ comfy_result 等它跑完并取图。`,
               '文生图直接用 comfy_run 的 template 模式写 prompt；要更复杂的图先 comfy_node 查节点再走 graph 模式。',
-              'img2img：comfy_run mode="img2img" + image_prompt_id（底图）+ denoise 做重绘；LoRA：comfy_run 的 lora 参数挂角色 LoRA（都要先在设置页开开关）。',
+              '「绘图模式」的会话里，输入框左侧有绘图控件：默认扩散模型（unet）与 LoRA 开关都在那里选，' +
+                'unet 省略时就用那边选中的模型；LoRA 没开就别传 lora。别的模式没有这两个控件，要指定模型就显式传 unet，LoRA 用不了。',
+              'img2img：comfy_run mode="img2img" + image_prompt_id（底图）+ denoise 做重绘（先在图生图开关里打开）。',
               'comfy_review：让审图模型看一张图判断是否满足要求、不满意自动重画（设置页开启 review 并指定模型）。',
               '要判断「角色是否还原」时，把参考图的 prompt_id 一起传给 comfy_review 的 reference_prompt_id —— 它会把两张图一起交给审图模型比对。',
-              'comfy_upscale：用算法放大一张图。审图模型在插件设置页的「ComfyUI 桥 → 选择审图模型」下拉框里挑。',
+              'comfy_upscale：用算法放大一张图（放大开关在插件设置页里开）。',
+              '图片落在哪：默认就是 ComfyUI 自己的 output 目录（comfy_result 会报出完整路径）；设置页的「输出目录」配了就额外复制一份过去，save_to 可以单次覆盖。那一栏只有「选择」按钮（点开是系统文件夹选择框）和一个「清除」，没有手填框。',
               '1024×1024 在消费级显卡上单张通常要几十秒到两分钟，所以 comfy_result 要带 wait_seconds（单张 120，多张按张数加）。',
               '显存吃紧时 batch 保持 1；要腾地方用 comfy_control free_vram。',
             ].join('\n'),

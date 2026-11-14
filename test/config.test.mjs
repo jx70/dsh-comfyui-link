@@ -2,7 +2,8 @@
  * config.test.mjs —— 配置 schema + 「能不能直接开源」的守护测试
  * ============================================================================
  * 前半段钉住 Config（设置页表单就是照它渲染的）：
- *   · 五个 volatile 段都在，默认值对
+ *   · 五个 volatile 段（review / img2img / upscale / draw / output）都在，默认值对
+ *   · 旧的 lora 段已经删掉（LoRA 开关搬到对话栏了）
  *   · review.maxAttempts 的 1–5 边界
  * 后半段钉住「去本地化」这件事本身：
  *   · 包里任何文件都不许再出现 @local/ 这种本机路径式包名
@@ -46,7 +47,7 @@ function sourceFiles(dir = ROOT, out = []) {
 
 /* ── Config schema ─────────────────────────────────────────────────────── */
 
-test('Config 给全套默认值：指向本机 8188，四个开关全关', () => {
+test('Config 给全套默认值：指向本机 8188，三个开关全关、绘图默认直连第一个模型且不挂 LoRA', () => {
   const value = Config({})
   assert.equal(value.baseUrl, 'http://127.0.0.1:8188')
   assert.deepEqual(unwrap(value.review), {
@@ -57,34 +58,45 @@ test('Config 给全套默认值：指向本机 8188，四个开关全关', () =>
     extra: '',
   })
   assert.deepEqual(unwrap(value.img2img), { enabled: false })
-  assert.deepEqual(unwrap(value.lora), { enabled: false })
   assert.deepEqual(unwrap(value.upscale), { enabled: false })
+  assert.deepEqual(unwrap(value.draw), { unet: '', lora: false })
+  // 输出目录默认空：图就留在 ComfyUI 自己的 output 里，不额外复制
+  assert.deepEqual(unwrap(value.output), { dir: '' })
+  // 设置页里的 LoRA 分区已经删掉，配置里也不该再有独立的 lora 段
+  assert.equal(value.lora, undefined)
 })
 
-test('四个功能段都是 volatile（设置页改完即时生效）', () => {
+test('五个功能段都是 volatile（改完即时生效）', () => {
   const value = Config({})
-  for (const key of ['review', 'img2img', 'lora', 'upscale']) {
+  for (const key of ['review', 'img2img', 'upscale', 'draw', 'output']) {
     assert.equal(typeof value[key]?.get, 'function', `${key} 不是 volatile 引用对象`)
   }
   // baseUrl 是静态配置，改了要重载插件，所以它不是 volatile
   assert.equal(typeof value.baseUrl, 'string')
 })
 
-test('Config 接受自定义 baseUrl 与四个开关', () => {
+test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', () => {
   const value = Config({
     baseUrl: 'http://192.168.1.9:8188',
     review: { enabled: true, provider: 'p', model: 'm', maxAttempts: 3, extra: '角色必须还原' },
     img2img: { enabled: true },
-    lora: { enabled: true },
     upscale: { enabled: true },
+    draw: { unet: 'some-model.safetensors', lora: true },
   })
   assert.equal(value.baseUrl, 'http://192.168.1.9:8188')
   const review = unwrap(value.review)
   assert.equal(review.maxAttempts, 3)
   assert.equal(review.extra, '角色必须还原')
   assert.equal(unwrap(value.img2img).enabled, true)
-  assert.equal(unwrap(value.lora).enabled, true)
   assert.equal(unwrap(value.upscale).enabled, true)
+  assert.deepEqual(unwrap(value.draw), { unet: 'some-model.safetensors', lora: true })
+})
+
+test('profile 里残留的旧 lora 段被原样透传但不参与功能（schema 不再声明它）', () => {
+  // schemastery 对未知键是透传而不是丢弃，所以这里断言的是「插件不再读它」：
+  // draw 段仍是默认值，说明旧的 lora.enabled 不会偷偷把 LoRA 打开。
+  const value = Config({ lora: { enabled: true } })
+  assert.deepEqual(unwrap(value.draw), { unet: '', lora: false })
 })
 
 test('Config 拒绝越界的 review.maxAttempts（1–5）', () => {
@@ -227,6 +239,27 @@ test('cordis.patch.yml 用的是发布名，且只放静态默认值', () => {
   assert.match(yaml, /name: dsh-comfyui-link/)
   assert.match(yaml, /baseUrl: 'http:\/\/127\.0\.0\.1:8188'/)
   assert.doesNotMatch(yaml, /@local/)
+})
+
+test('cordis.patch.yml 声明了第五个模式「绘图模式」', () => {
+  const yaml = read('cordis.patch.yml')
+  // 声明行 + 身份 + 顺序：这是 agentPresets.register 认的三样
+  assert.match(yaml, /id: preset-draw/)
+  assert.match(yaml, /name: '@deepseek-ai\/dsh-agent-preset'/)
+  assert.match(yaml, /^\s+id: draw$/m)
+  assert.match(yaml, /^\s+order: 5$/m)
+  // 新预设必须自带 name/description，否则会被当成内置模式走 locale（那里没有它）
+  assert.match(yaml, /name: 绘图模式/)
+  assert.match(yaml, /description: /)
+  // 子插件必须写裸包名：相对路径不会被解析层按安装目录重写，会解析失败
+  const relative = []
+  for (const line of yaml.split('\n')) {
+    const m = /^\s+name:\s*['"]?([^'"\n]+)['"]?\s*$/.exec(line)
+    if (m && /^\.{1,2}\//.test(m[1])) relative.push(m[1])
+  }
+  assert.deepEqual(relative, [], `preset 子插件用了相对路径：${relative.join(', ')}`)
+  // complete: true 会把 system prompt 压成只剩 persona，连 comfyui 的出图说明一起没了
+  assert.doesNotMatch(yaml, /complete:\s*true/)
 })
 
 test('client.js 的模块 id 与 style 标记跟着包名走', () => {

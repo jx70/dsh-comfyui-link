@@ -128,6 +128,25 @@ test('只读路由挂上 /api/comfyui/vision-models，且只留能看图的模�
   assert.deepEqual(body.providers[0].models.map((m) => m.id), ['mock-vision-model'])
 })
 
+test('只读路由挂上 /api/comfyui/draw-models，给对话栏的生图模型下拉供数据', async () => {
+  // 死端口：既保证不会碰到真在跑的 ComfyUI（否则本机会返回 200），也保证快速失败
+  const { routes } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
+  const route = routes.find((r) => r.path === '/api/comfyui/draw-models')
+  assert.ok(route, '生图模型清单路由没注册')
+  assert.deepEqual(route.methods, ['GET'])
+  assert.equal(route.requestBody, 'buffered')
+
+  // ComfyUI 没跑时必须给一份「空清单 + 原因」，而不是抛出去变成 500 崩栈
+  const response = await route.fetch(new Request('http://localhost/api/comfyui/draw-models'))
+  assert.equal(response.status, 502)
+  assert.match(response.headers.get('cache-control') ?? '', /no-store/)
+  const body = await response.json()
+  assert.equal(body.ok, false)
+  assert.equal(typeof body.error, 'string')
+  assert.ok(body.error.length > 0)
+  assert.deepEqual(body.folders, {})
+})
+
 test('没有 connection 服务时安静跳过路由，不影响工具注册', () => {
   const fake = createFakeCtx()
   delete fake.ctx.connection
@@ -136,7 +155,7 @@ test('没有 connection 服务时安静跳过路由，不影响工具注册', ()
   assert.equal(fake.tools.size, 8)
 })
 
-test('默认配置下三个功能开关全关，调用会被拦并提示去设置页开', async () => {
+test('默认配置下三个功能开关全关，调用会被拦并提示去设置页 / 对话栏开', async () => {
   // baseUrl 指到必然没人听的端口：这些校验必须发生在联网之前，
   // 否则开着 ComfyUI 的机器上测试会假通过，CI 上才炸。
   const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
@@ -156,14 +175,28 @@ test('默认配置下三个功能开关全关，调用会被拦并提示去设�
   )
 })
 
+test('LoRA 闸指向对话栏（不是设置页），文案说清去哪儿打开', async () => {
+  const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
+  await assert.rejects(
+    () => tools.get('comfy_run').execute({ mode: 'template', prompt: 'x', lora: 'a.safetensors' }, createExec()),
+    (error) => {
+      const message = String(error?.message ?? error)
+      assert.match(message, /LoRA/)
+      assert.match(message, /输入框左侧/)
+      assert.doesNotMatch(message, /设置页/)
+      return true
+    },
+  )
+})
+
 test('开关打开后不再被「没开启」拦下（会在网络那一步才失败）', async () => {
   // baseUrl 指到一个必然没人听的端口：既保证不会碰到真服务，也保证快速失败
   const { tools } = boot({
     baseUrl: 'http://127.0.0.1:1',
     timeoutMs: 2000,
     img2img: { enabled: true },
-    lora: { enabled: true },
     upscale: { enabled: true },
+    draw: { unet: '', lora: true },
   })
   const exec = createExec()
 
@@ -248,6 +281,24 @@ test('comfy_upscale 的 method 只给五个算法，默认 lanczos 走 lib', () 
   const params = tools.get('comfy_upscale').parameters
   assert.deepEqual(params.required, ['image_prompt_id', 'width', 'height'])
   assert.deepEqual(params.properties.method.enum, ['nearest-exact', 'bilinear', 'area', 'bicubic', 'lanczos'])
+})
+
+test('三个取图入口都能收 save_to，且它不是必填项', () => {
+  const { tools } = boot()
+  for (const [name, required] of [
+    ['comfy_result', ['prompt_id']],
+    ['comfy_review', ['prompt_id', 'requirement']],
+    ['comfy_upscale', ['image_prompt_id', 'width', 'height']],
+  ]) {
+    const params = tools.get(name).parameters
+    assert.deepEqual(params.required, required, `${name} 的必填项变了`)
+    assert.equal(params.properties.save_to?.type, 'string', `${name} 少了 save_to 参数`)
+    assert.doesNotMatch(
+      params.properties.save_to.description,
+      /设置页把/,
+      `${name} 的 save_to 说明要指向设置页的输出目录，不是开关`,
+    )
+  }
 })
 
 test('comfy_run 的 mode 是唯一必填项，其余都可选', () => {

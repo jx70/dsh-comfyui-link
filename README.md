@@ -1,4 +1,4 @@
-﻿# dsh-comfyui-link
+# dsh-comfyui-link
 
 [![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -9,7 +9,7 @@
 
 > English: [README.en.md](./README.en.md)
 
-**目录** · [它解决什么问题](#它解决什么问题) · [特性](#特性) · [工具](#工具) · [前置条件](#前置条件) · [安装](#安装) · [快速上手](#快速上手) · [设置页](#设置页) · [配置](#配置) · [工作原理](#工作原理) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题) · [开发](#开发) · [踩过的坑](#踩过的坑)
+**目录** · [它解决什么问题](#它解决什么问题) · [特性](#特性) · [工具](#工具) · [绘图模式](#绘图模式) · [前置条件](#前置条件) · [安装](#安装) · [快速上手](#快速上手) · [设置页](#设置页) · [配置](#配置) · [工作原理](#工作原理) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题) · [开发](#开发) · [踩过的坑](#踩过的坑)
 
 ## 它解决什么问题
 
@@ -25,10 +25,12 @@
 
 - **8 个工具**覆盖从探活到出图的全链路，模型不需要你会 ComfyUI 的 HTTP API。
 - **审图闭环**：出图后交给指定的视觉模型判定，不满意就按它给的新提示词重画，循环到满意或达上限；给一张参考图还能比对角色还原度。
-- **设置页热生效**：地址、审图模型、img2img / LoRA / 放大三个开关都在设置页里改，改完立刻生效，不用重启 DSH。
+- **自带「绘图模式」**：在标准 / 极简 / PTC / 创造之外多一个 `draw` 预设，会话一进去就是出图助手的人设，输入框左侧还有生图模型与 LoRA 开关（其余模式看不到这两个控件）。
+- **设置页草稿 + 保存**：地址、审图模型、img2img / 放大开关、图片输出目录在设置页里改，本地先攒成草稿，点「保存」才写进 profile；写的是配置层，不重启 DSH 也即时生效。
+- **图片输出目录可指定**：留空就只留在 ComfyUI 自己的 `output/`；选了一个目录则每次取图额外复制一份过去（同名不覆盖，自动加后缀），单次调用还能用 `save_to` 覆盖。目录不用手打 —— 设置页里只有一个「选择」按钮，点了直接弹系统文件夹选择框。
 - **零宿主内部依赖**：`lib/comfy.mjs` 只用 Node 自带的 `fetch`，不 import 任何 `@deepseek-ai/*`，可以脱离 DSH 单独跑（`npm run selftest` 就是干这个）。
 - **graph 模式接管任意工作流**：在 ComfyUI 里导出 API 格式的 JSON，直接交给模型跑，提示词和种子都能改。
-- **可验证**：64 条纯单测 + 7 个探针脚本，全都不需要你手点。
+- **可验证**：82 条纯单测 + 7 个探针脚本，全都不需要你手点。
 
 ## 工具
 
@@ -42,8 +44,37 @@
 | `comfy_run` | 提交任务：`mode="template"` 文生图（可挂 LoRA）、`mode="img2img"` 图生图、`mode="graph"` 传自己的 API 格式工作流 |
 | `comfy_result` | 等任务跑完并取回输出图，图会真的交给模型看，同时报磁盘路径，也能 `save_to` 另存 |
 | `comfy_control` | 取消任务 / 打断当前 / 清空队列 / 释放显存 |
-| `comfy_review` | **审图重生成**：让指定模型看图判断是否满意，不满自动按它的意见重画，循环到满意或达上限；给 `reference_prompt_id` 还能比对角色还原度 |
-| `comfy_upscale` | 用算法（ImageScale，默认 lanczos）放大一张已生成的图 |
+| `comfy_review` | **审图重生成**：让指定模型看图判断是否满意，不满自动按它的意见重画，循环到满意或达上限；给 `reference_prompt_id` 还能比对角色还原度，也能 `save_to` 另存 |
+| `comfy_upscale` | 用算法（ImageScale，默认 lanczos）放大一张已生成的图，也能 `save_to` 另存 |
+
+## 绘图模式
+
+装好之后，新会话的模式菜单里会多一个 **绘图模式**（次序在标准 / PTC / 极简 / 创造之后）。它是一份独立的 Agent 预设，挂的是精简插件集（人格、时间、文件、压缩、提问、待办、present），人格换成「出图助手」：把需求整理成正面提示词 → `comfy_run` → `comfy_result` 取图；变体走 img2img / upscale / review。
+
+进到这个模式的会话，**输入框左侧多两个控件**：
+
+| 控件 | 写进哪 | 干什么 |
+| --- | --- | --- |
+| 生图模型下拉 | `draw.unet` | `comfy_run` / `comfy_review` 省略 `unet` 时就用它；选「自动」则用 `diffusion_models` 里第一个 |
+| `LoRA` 胶囊 | `draw.lora` | 打开后才允许给 `comfy_run` / `comfy_review` 传 `lora`；关着时传会被拦下 |
+
+这两个控件是**即时写入**的（点完就生效，跟设置页的草稿+保存是两套语义）。它们只在这个模式的会话里渲染 —— 判断依据是会话的 `agentPreset` 投影等于 `draw`，别的模式完全看不到，模型也会被告知「别的模式没有这两个控件，要指定模型就显式传 `unet`，LoRA 用不了」。
+
+预设声明随插件自己的 `cordis.patch.yml` 一起发，装包即装模式，不用手改 profile：
+
+```yaml
+- insert:
+    - id: preset-draw
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: draw
+        name: 绘图模式
+        description: 专注出图：直接描述画面，用本机 ComfyUI 生成并取回图片。
+        order: 5
+        plugins: [ ... ]
+```
+
+想改这个人格或换插件集，在 profile 的 `cordis.patch.yml` 里按 `preset-draw` 覆盖 `config.plugins` 即可（覆盖是**整体替换**，不会与这份默认列表合并）。
 
 ## 前置条件
 
@@ -66,7 +97,7 @@ git clone https://github.com/jx70/dsh-comfyui-link.git
 dsh plugin --profile web add link:/path/to/dsh-comfyui-link
 ```
 
-装完重启 DSH，打开 **设置 → ComfyUI 桥**，点一下「刷新」——能列出模型就说明通了。
+装完重启 DSH，打开 **新会话的模式菜单**，能看见「绘图模式」；再进 **设置 → ComfyUI 桥**，审图模型下拉能列出模型就说明通了。
 
 装的时候 DSH 会自动把包名写进 profile 的 `dsh.profile.bundles`，**不用手改任何 yml**。
 
@@ -79,6 +110,8 @@ dsh plugin --profile web remove dsh-comfyui-link
 > 暂未发布到 npm。别用 `add` 后面直接跟包名那种写法——registry 上没有这个包，装不到东西。
 
 ## 快速上手
+
+> 在**绘图模式**的会话里说这些最省事：生图模型与 LoRA 开关就在输入框左侧。别的模式也能用，只是要显式传 `unet`、LoRA 用不了。
 
 **一句话出图**
 
@@ -106,7 +139,7 @@ dsh plugin --profile web remove dsh-comfyui-link
 
 > 用 my_style 这个 LoRA 画一张人像，强度 0.8
 
-模型走 `comfy_run` 的 template 模式 + `lora` / `lora_strength`。手上有哪些 LoRA 用 `comfy_models` 查。需要先打开 LoRA 开关。
+模型走 `comfy_run` 的 template 模式 + `lora` / `lora_strength`。手上有哪些 LoRA 用 `comfy_models` 查。**要先在输入框左侧的绘图控件里把 `LoRA` 打开**（只在绘图模式有）。
 
 **放大**
 
@@ -120,11 +153,11 @@ dsh plugin --profile web remove dsh-comfyui-link
 
 > 用这张工作流跑一下，提示词改成「海边灯塔」，种子换 777
 
-模型会走 `comfy_run` 的 graph 模式，提示词自动写进 `CLIPTextEncode` 节点（也可以用 `prompt_node` 指定写哪个）。graph 模式不受上面三个开关限制——它不依赖内置模板。
+模型会走 `comfy_run` 的 graph 模式，提示词自动写进 `CLIPTextEncode` 节点（也可以用 `prompt_node` 指定写哪个）。graph 模式不受功能开关限制——它不依赖内置模板。
 
 ## 设置页
 
-DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
+DSH 设置 → ComfyUI 桥。改动先在本地攒成草稿（顶部会提示「有未保存的改动」），点底部的 **保存** 才写进 profile；写完不用重启 DSH 就生效。
 
 | 分组 | 字段 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -134,12 +167,33 @@ DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
 | | `maxAttempts` | 1 | 最多重生成几次（1–5） |
 | | `extra` | 空 | 额外审图要求（如「角色必须还原银色长发」） |
 | 图生图 | `enabled` | 关 | 关掉时 `mode="img2img"` 会被拦下 |
-| LoRA | `enabled` | 关 | 关掉时 `comfy_run` 的 `lora` 参数会被拦下 |
 | 放大 | `enabled` | 关 | 关掉时 `comfy_upscale` 会被拦下 |
+| 输出 | `dir` | 空 | 图片另存目录；留空＝图只留在 ComfyUI 自己的 output 里。这里**没有输入框**，只有「选择」按钮（弹系统文件夹选择框）和一个「清除」按钮 |
 
-`provider` / `model` 在设置页里是**一个下拉框**，不是手填：设置页打开时浏览器会向宿主取一份「能看图的模型」清单（`GET /api/comfyui/vision-models`，按 provider 分组），直接选一项即可；留空 = 跟随当前会话模型。清单右侧有「刷新」按钮，新装了 provider 或换了账号可以点一下重取。这个下拉与审图总开关无关，没开审图也能先看清有哪些模型可选。
+`provider` / `model` 在设置页里是**一个下拉框**，不是手填：设置页打开时浏览器会向宿主取一份「能看图的模型」清单（`GET /api/comfyui/vision-models`，按 provider 分组），直接选一项即可；留空 = 跟随当前会话模型。清单在打开设置页时自动取一次，没有「刷新」按钮。这个下拉与审图总开关无关，没开审图也能先看清有哪些模型可选。
 
-开关是**故意默认全关**的：这三个功能会各自往 ComfyUI 上多挂节点、多花时间，默认关着能保证「装上就能出一张图」，其余按需开。
+开关是**故意默认全关**的：这两个功能会各自往 ComfyUI 上多挂节点、多花时间，默认关着能保证「装上就能出一张图」，其余按需开。
+
+> LoRA 不在这里：它是逐次出图的选择，放在会话输入框左侧的绘图控件里（只在绘图模式可见），写 `draw.lora`。
+
+输出目录（`output.dir`）三种取值：
+
+| 写什么 | 图落在哪 |
+| --- | --- |
+| 留空 | 只留在 ComfyUI 自己的 output 目录，不额外复制 |
+| 绝对路径（如 `<你的图库>/comfy`） | 原样使用，每次取图都复制一份过去 |
+| 相对路径（如 `dsh/copies`） | 相对 **ComfyUI 的 output 目录**解析；认不出 ComfyUI 装在哪时会报错，让你改成绝对路径 |
+
+判定「绝对」不走 `path.isAbsolute` —— 它在 Windows 和 Linux 上对 `X:/…` 的结论相反，所以插件用自己的 `looksAbsolute`（盘符式、`/` 开头、UNC `\\\\` 开头都算绝对），同一份配置在两个平台上结论一致。
+
+**「选择」按钮**：设置页里这一栏**只有按钮、没有输入框**，路径只能从系统文件夹选择框里挑。点一下会向宿主发一次 `POST /api/comfyui/pick-directory`，宿主在本机拉起一个 Windows 文件夹选择框（`powershell.exe -STA` + WinForms `FolderBrowserDialog`，挂在浏览器前面弹出），挑完把路径回传给页面；旁边「清除」把已选目录清空（等于回到「图只留在 ComfyUI 的 output」）。四个细节值得知道：
+
+- 选中的路径**只进草稿**，仍要点「保存」才落盘 —— 免得误点一下就把配置改了。
+- 对话框是**阻塞式**的：请求会一直挂着等你点，插件自己给 180 秒超时。同一个窗口里连点两次，第二次会被宿主挡回（409「已经有一个选择框开着」）。
+- 只在 Windows 上有。别的平台点按钮会提示「这个平台没有系统文件夹选择框，输出目录在这里设不了」，这一栏就只能靠改 profile 的 `cordis.patch.yml`（`output.dir`）来配 —— 相对路径在那里仍然按 ComfyUI 的 output 解析。
+- 中文路径不走子进程 stdout（控制台代码页会写坏），而是写一个临时 UTF-8 文件再读回来。
+
+`save_to` 是**逐次覆盖**：任何一次 `comfy_result` / `comfy_review` / `comfy_upscale` 传了 `save_to`，就按它走、不看设置页那一栏。同名文件不会被覆盖，会自动加 `-1` / `-2` 后缀。
 
 ## 配置
 
@@ -169,7 +223,7 @@ DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
 | `timeoutMs` | `20000` | 单次 HTTP 请求超时 |
 | `pollMs` | `2500` | `comfy_result` 轮询间隔 |
 | `maxWaitSeconds` | `900` | 单个任务最多等多久 |
-| `outputRoot` | `''` | 输出图在磁盘上的目录。**留空会自动从 `/system_stats` 的启动参数里认出 ComfyUI 装在哪**，一般不用填 |
+| `outputRoot` | `''` | 输出图在磁盘上的目录。**留空会自动从 `/system_stats` 的启动参数里认出 ComfyUI 装在哪**，一般不用填。这是「读」用的路径（插件据此拼原图路径、解析相对输出目录）；「另存一份」用的是设置页里的 `output.dir` |
 
 `comfy_review` 的几个细节参数：
 
@@ -177,7 +231,7 @@ DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
 | --- | --- |
 | `reference_prompt_id` | **角色参考图**。给一个之前出过的图的 `prompt_id`，审图时会把「结果图 + 参考图」两张一起交给模型，让它比对角色还原度（发型 / 发色 / 瞳色 / 服饰 / 配色 / 气质），参考图里的多余元素不算进要求 |
 | `max_attempts` | 覆盖设置页里的 `maxAttempts`（0–5） |
-| `lora` / `lora_strength` | 重画时挂 LoRA（需先打开 LoRA 开关），强度和 `comfy_run` 一致 |
+| `lora` / `lora_strength` | 重画时挂 LoRA（要先在输入框左侧的绘图控件里打开 LoRA），强度和 `comfy_run` 一致 |
 
 重画默认**沿用底图的尺寸**（按 16 取整），不会把 768 的图悄悄重画成 1024 的比例。
 
@@ -186,8 +240,8 @@ DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
 三层，彼此的边界很清楚：
 
 - `lib/comfy.mjs` —— 纯 HTTP 客户端 + 工作流构造（`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` 等），**不 import 任何 `@deepseek-ai/*`**，能脱离 DSH 单独跑
-- `index.js` —— Host 插件，注册 8 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册 `GET /api/comfyui/vision-models` 只读路由给设置页取模型清单
-- `client.js` —— 浏览器半端，往 `settings.section` 槽位注册「ComfyUI 桥」这一页，用 `configForms` 读写 volatile 字段
+- `index.js` —— Host 插件，注册 8 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册两条只读路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）
+- `client.js` —— 浏览器半端，两处 UI：`settings.section` 槽位里的「ComfyUI 桥」设置页（草稿 + 保存），以及 `conversation.input.left` 槽位里的绘图控件（只在绘图模式渲染）
 
 `index.js` 里除了工具，还 `import z from '@deepseek-ai/schemastery'` 用来定义 `export const Config`。所以 `dependencies` 里只有它，没有别的运行期依赖。
 
@@ -196,7 +250,7 @@ DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
 ## 兼容性与已知限制
 
 - **验证过的 ComfyUI 版本**：0.30.2。更老的版本大概率也能跑，但 `POST /api/jobs/{id}/cancel` 这类较新的端点可能不存在——`comfy_control` 的 `cancel` 在那种版本上会报 404，`interrupt` 仍然可用。
-- **只做 web profile**：`dsh.client.platform` 是 `web`，设置页要有浏览器才看得见。纯 CLI 场景下工具仍然可用，只是改不了开关（开关可以写在 `cordis.patch.yml` 里）。
+- **只做 web profile**：`dsh.client.platform` 是 `web`，设置页与输入框左侧的绘图控件都要有浏览器才看得见。纯 CLI 场景下工具仍然可用，只是改不了开关（配置可以写在 `cordis.patch.yml` 里）。
 - **内置模板只走三件套加载器**：`UNETLoader + CLIPLoader + VAELoader`。如果你的模型是整包 `checkpoints`，用 `mode="graph"` 传自己的 `CheckpointLoaderSimple` 工作流。
 - **放大是算法放大**：`ImageScale` 的 lanczos / bicubic 等，不加载放大模型（ESRGAN 之类）。要 AI 放大就自己搭工作流走 graph 模式。
 - **审图模型必须能收图**：设置页下拉里只列 `inputModalities` 含 `image` 的模型。纯文本模型选了也没用，请求会被下游拒。
@@ -207,8 +261,14 @@ DSH 设置 → ComfyUI 桥。改完即时生效，不用重启。
 **装好了但工具没出现？**
 重启 DSH。ESM 模块和 profile 的 bundle 列表都在启动时读，`link:` 装完不重启不生效。`dsh plugin --profile web list` 能看到包名、但模型手里没工具，多半就是没重启。
 
-**设置页里「刷新」点了没反应，或者模型清单是空的？**
+**设置页的模型清单是空的？**
 说明 `GET /api/comfyui/vision-models` 没通。先确认设置页里显示的地址能连上（那是 ComfyUI 地址，不是 DSH 地址）；再确认当前会话用的 provider 有能看图的模型。清单为空但插件本身正常时，把审图的 `provider` / `model` 留空，它会回退到当前会话模型。
+
+**输入框左侧没有绘图控件？**
+那说明当前会话不是绘图模式 —— 这两个控件只挂给 `agentPreset === 'draw'` 的会话。新建会话时选「绘图模式」就有了；已有的标准 / PTC / 极简 / 创造会话不会中途冒出来（预设一旦开始对话就固定）。
+
+**点了「保存」没反应？**
+看保存行右边的提示：`保存失败` 会跟一条具体原因（多半是 `Config field "..." is not volatile`，说明那个字段没声明成 volatile，设置页写不进去）。`有未保存的改动` 说明草稿还没提交，按钮此时应该是可点的。
 
 **`comfy_status` 报连不上？**
 插件默认找 `http://127.0.0.1:8188`。ComfyUI 装在别的机器或换了端口，就在 profile 的 `cordis.patch.yml` 里覆盖 `baseUrl`（见[配置](#配置)）。
@@ -230,7 +290,7 @@ npm run selftest              # 直接对着 ComfyUI 把 lib/comfy.mjs 走一遍
 npm run probe:route           # 假 ctx 抓 connection.fetch 路由，验模型筛选逻辑
 npm run probe:http            # 真打 HTTP，验路由确实在信任栅栏内部
 npm run probe:features        # 真出图：template / img2img / LoRA / upscale + 开关拦截
-npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新代码
+npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新代码（DrawBar / 保存按钮 / 两条路由）
 ```
 
 需要「真打 DSH」的探针（`probe:http` / `probe:bundle`）用环境变量找环境，取不到就跳过（exit 0），不会红一片：
@@ -260,9 +320,12 @@ npm run probe:bundle          # 确认浏览器拿到的 client.js 里确有新�
 - **不要写 `export default apply`**：`cordis-plugin-loader` 的 `unwrapExports` 会因此拿到裸函数，`inject` 等命名导出全丢，启动时报 `cannot get property "tools" without inject`。
 - **改源码后要重载插件**：ESM 模块有缓存，改完 `lib/*.mjs` 需要把插件 disable 再 enable 一次才生效。
 - **别用 PowerShell 管道改含中文的源码**：`Set-Content` 会把 UTF-8 写坏，直接 SyntaxError。
-- **volatile 字段是引用对象**：schemastery `.volatile()` 的字段在 `apply()` 里是 cosmokit 引用对象，要用 `.get()` 解包才能拿到当前值（这样设置页热编辑才即时生效）。
+- **volatile 字段是引用对象**：schemastery `.volatile()` 的字段在 `apply()` 里是 cosmokit 引用对象，要用 `.get()` 解包才能拿到当前值（这样设置页与对话栏的改动才即时生效）。反过来说，**只有 volatile 字段写得进去** —— 宿主对非 volatile 路径直接抛 `Config field "..." is not volatile`。
 - **img2img 要先上传底图**：`LoadImage` 只能读 ComfyUI input 目录的文件，所以 `buildImg2Img` 前要 `client.uploadImage()`（POST `/upload/image`）把底图字节传上去拿文件名。
-- **设置页的模型清单必须走 `connection.fetch`**：不能用 `webServer.register` 自己挂 `/api/...`。DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面，自己挂会被外层前缀路由先吃掉，表现就是永远 401。
+- **模型清单路由必须走 `connection.fetch`**：不能用 `webServer.register` 自己挂 `/api/...`。DSH 把整个 `/api` 前缀挂在 connection 的信任栅栏后面，自己挂会被外层前缀路由先吃掉，表现就是永远 401。
+- **前端槽位要靠标准 props 拿会话**：`conversation.input.left` 的组件能直接拿到 `sessionId` / `useSessions`，判断 preset 就照出厂 `AgentPresetLabel` 的写法读 `state.byId[sessionId].projectionValues.agentPreset`；自己的 form 句柄用注册处的 `inject: (sessionId) => ({...})` 透传。
+- **别用 `path.isAbsolute` 判平台路径**：它对 `X:/…` 在 Windows 上是真、在 Linux 上是假，同一份配置两个平台结论相反。插件用自己的 `looksAbsolute`（盘符式 / `/` 开头 / UNC），`output.dir` 的解析走它。
+- **改 `package.json` 别用 `Set-Content -Encoding UTF8`**：会给文件加 BOM，`npm test` 直接报 `SyntaxError: Unexpected token '﻿'`。用 node 的 `fs.writeFileSync(path, text, 'utf8')`。
 
 ## 许可
 

@@ -1,4 +1,4 @@
-﻿# dsh-comfyui-link
+# dsh-comfyui-link
 
 [![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
@@ -9,7 +9,7 @@ Drive your own ComfyUI from [DeepSeek Harness](https://github.com/deepseek-ai/de
 
 > 中文说明见 [README.md](./README.md)
 
-**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [Configuration](#configuration) · [How it works](#how-it-works) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
+**Contents** · [The problem](#the-problem) · [Features](#features) · [Tools](#tools) · [Draw mode](#draw-mode) · [Requirements](#requirements) · [Install](#install) · [Usage](#usage) · [Settings page](#settings-page) · [Configuration](#configuration) · [How it works](#how-it-works) · [Compatibility](#compatibility-and-known-limits) · [FAQ](#faq) · [Development](#development) · [Gotchas](#gotchas)
 
 ## The problem
 
@@ -25,10 +25,12 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 
 - **Eight tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
 - **Review loop**: after a render, the designated vision model judges it; if unsatisfied, the plugin re-renders from its suggested prompt until the result passes or the attempt limit is hit. Pass a reference image to compare character fidelity.
-- **Live settings**: address, review model, and the img2img / LoRA / upscale switches all live on a settings page that applies changes immediately — no DSH restart.
+- **A built-in Draw mode**: alongside Standard / Minimal / PTC / Create there is a `draw` preset whose session starts as a rendering assistant, with an image-model picker and a LoRA toggle at the left of the composer (invisible in every other mode).
+- **Draft-then-save settings**: address, review model, the img2img / upscale switches, and the image output directory are edited locally as a draft and written to the profile only when you press **Save**; no DSH restart needed once written.
+- **Configurable output directory**: leave it empty and images stay only in ComfyUI own `output/`; point it at a directory and every fetch is also copied there (existing files are never overwritten — a suffix is appended). A single call can override it with `save_to`, and the directory is chosen with a **Pick** button that opens the native folder dialog — there is no path text box.
 - **No host internals**: `lib/comfy.mjs` uses nothing but Node's built-in `fetch` and imports no `@deepseek-ai/*`, so it runs standalone (`npm run selftest` does exactly that).
 - **Graph mode takes over any workflow**: export a workflow from ComfyUI in API format, hand it over, and the prompt and seed are still editable.
-- **Verifiable**: 64 unit tests plus 7 probe scripts, none of which need you to click anything.
+- **Verifiable**: 82 unit tests plus 7 probe scripts, none of which need you to click anything.
 
 ## Tools
 
@@ -42,8 +44,23 @@ Eight tools become available to the model:
 | `comfy_run` | Submit a job — `mode="template"` txt2img (optionally with a LoRA), `mode="img2img"`, or `mode="graph"` with your own API-format workflow |
 | `comfy_result` | Wait for the job, fetch the output images, actually show them to the model, report on-disk paths, optionally `save_to` |
 | `comfy_control` | Cancel a job / interrupt the running one / clear the queue / free VRAM |
-| `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity |
-| `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image |
+| `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity, and `save_to` to keep a copy |
+| `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image, with optional `save_to` |
+
+## Draw mode
+
+The installer adds a fifth agent preset, **Draw mode** (`draw`, ordered after Standard / PTC / Minimal / Create). It mounts a slim plugin set (persona, time, files, compaction, ask-user, todo, present) and swaps the persona for a rendering assistant: turn the request into a positive prompt → `comfy_run` → `comfy_result`; variants go through img2img / upscale / review.
+
+Sessions in that preset get **two extra controls at the left of the composer**:
+
+| Control | Writes | Effect |
+| --- | --- | --- |
+| Image-model dropdown | `draw.unet` | Used whenever `comfy_run` / `comfy_review` omit `unet`; "auto" means the first file in `diffusion_models` |
+| `LoRA` chip | `draw.lora` | Only when it is on may `comfy_run` / `comfy_review` attach `lora`; otherwise the call is rejected |
+
+Both write **immediately** (click and it takes effect — a different contract from the settings page's draft-then-save). They render only in that preset: the check is the session's `agentPreset` projection being `draw`, so other modes never show them, and the model is told that elsewhere it must pass `unet` explicitly and cannot use LoRA.
+
+The preset declaration ships inside the plugin's own `cordis.patch.yml`, so installing the package installs the mode. To change the persona or the plugin set, override `preset-draw`'s `config.plugins` in the profile patch (the override **replaces** the list wholesale).
 
 ## Requirements
 
@@ -66,7 +83,7 @@ git clone https://github.com/jx70/dsh-comfyui-link.git
 dsh plugin --profile web add link:/path/to/dsh-comfyui-link
 ```
 
-Restart DSH, open **Settings → ComfyUI Bridge**, and hit **Refresh** — if the model list appears, the connection works.
+Restart DSH, open the **new-session mode menu** and you should see **Draw mode**; then open **Settings → ComfyUI Bridge** — if the review-model dropdown fills in, the connection works.
 
 Installing also writes the package name into your profile's `dsh.profile.bundles` automatically. **You never edit any yml by hand.**
 
@@ -79,6 +96,8 @@ dsh plugin --profile web remove dsh-comfyui-link
 > Not published to npm yet. Don't use the bare-package-name form of `add` — the registry has no such package and nothing gets installed.
 
 ## Usage
+
+> These work best in a **Draw mode** session, where the render model and LoRA controls sit at the left of the composer. Other modes still work — just pass `unet` explicitly, and LoRA is unavailable.
 
 **One-line image generation**
 
@@ -106,7 +125,7 @@ Uses `comfy_run` with `mode="img2img"`; `image_prompt_id` points at the base ima
 
 > Draw a portrait with the my_style LoRA, strength 0.8
 
-Uses `comfy_run` in template mode with `lora` / `lora_strength`. Use `comfy_models` to see what's installed. The LoRA switch must be on.
+Uses `comfy_run` in template mode with `lora` / `lora_strength`. Use `comfy_models` to see what's installed. **Turn the `LoRA` chip on in the composer's draw control first** (Draw mode only).
 
 **Upscale**
 
@@ -124,7 +143,7 @@ The model uses `comfy_run` in graph mode; the prompt is written into the `CLIPTe
 
 ## Settings page
 
-Settings → ComfyUI Bridge. Changes apply immediately, no restart.
+Settings → ComfyUI Bridge.
 
 | Group | Field | Default | Notes |
 | --- | --- | --- | --- |
@@ -134,12 +153,35 @@ Settings → ComfyUI Bridge. Changes apply immediately, no restart.
 | | `maxAttempts` | 1 | Max redraws (1–5) |
 | | `extra` | empty | Extra review requirements (e.g. "the character must have silver hair") |
 | img2img | `enabled` | off | When off, `mode="img2img"` is rejected |
-| LoRA | `enabled` | off | When off, `comfy_run`'s `lora` argument is rejected |
 | Upscale | `enabled` | off | When off, `comfy_upscale` is rejected |
+| Output | `dir` | empty | Where fetched images are copied; empty keeps them only in ComfyUI own output. **No text field here** — only the **Pick** button (native folder dialog) and a **Clear** button |
 
-`provider` / `model` are **a single dropdown**, not free text: when the settings page opens, the browser fetches a list of vision-capable models from the host (`GET /api/comfyui/vision-models`, grouped by provider). Leaving it empty means "follow the current session model". The **Refresh** button re-fetches after you install a provider or switch accounts. The dropdown is independent of the review switch — you can inspect the available models before enabling anything.
+`provider` / `model` are **a single dropdown**, not free text: when the settings page opens, the browser fetches a list of vision-capable models from the host (`GET /api/comfyui/vision-models`, grouped by provider). Leaving it empty means "follow the current session model". The list is fetched once when the page opens — there is no Refresh button. The dropdown is independent of the review switch — you can inspect the available models before enabling anything.
 
-The three feature switches are **off on purpose**: each of them adds nodes and time on the ComfyUI side. Defaults off guarantees "install and get one image", everything else is opt-in.
+Edits stay as a local draft (the row says "unsaved changes") until you press **Save** at the bottom, which writes to the profile; no DSH restart is needed afterwards.
+
+The two feature switches are **off on purpose**: each of them adds nodes and time on the ComfyUI side. Defaults off guarantees "install and get one image", everything else is opt-in.
+
+> LoRA is not on this page: it is a per-render choice, so it lives in the composer's draw control (`draw.lora`), visible only in Draw mode.
+
+The output directory (`output.dir`) has three shapes:
+
+| What you write | Where the images go |
+| --- | --- |
+| empty | Left only in ComfyUI own output; nothing is copied |
+| an absolute path (e.g. `<your gallery>/comfy`) | Used as-is; every fetch is copied there as well |
+| a relative path (e.g. `dsh/copies`) | Resolved under **ComfyUI own output**; if ComfyUI's location cannot be detected it errors out and asks for an absolute path |
+
+"Absolute" is not decided by `path.isAbsolute` — that answers oppositely for `X:/…` on Windows and Linux, so the plugin has its own `looksAbsolute` (drive-letter form, leading `/`, leading UNC `\\`), which gives the same verdict from one config on both platforms.
+
+**The Pick button**: this row has **no text field** — the path can only come from the native folder dialog. The button posts to `POST /api/comfyui/pick-directory`; the host then launches a native Windows folder dialog (`powershell.exe -STA` plus the WinForms `FolderBrowserDialog`, forced in front of the browser) and hands the chosen path back to the page. The **Clear** button next to it empties the selection (back to "images stay in ComfyUI own output"). Four things worth knowing:
+
+- The picked path **lands in the draft only** — you still press **Save**, so a stray click cannot rewrite your config.
+- The dialog is **blocking**: the request stays open until you choose, and the plugin times it out after 180 seconds. A second click while one dialog is open is rejected by the host (409, "a picker is already open").
+- Windows only. On any other platform the button reports that no native picker exists, so this row cannot be set from the page — edit `output.dir` in the profile's `cordis.patch.yml` instead (a relative path is still resolved under ComfyUI own output).
+- Chinese paths never travel over the child process stdout (the console code page would mangle them) — they go through a UTF-8 temp file instead.
+
+`save_to` **overrides per call**: any `comfy_result` / `comfy_review` / `comfy_upscale` that passes `save_to` uses it and ignores the settings field. Existing files are never overwritten — a `-1` / `-2` suffix is appended instead.
 
 ## Configuration
 
@@ -169,7 +211,7 @@ Other options (overridable in the same place):
 | `timeoutMs` | `20000` | Per-request HTTP timeout |
 | `pollMs` | `2500` | `comfy_result` polling interval |
 | `maxWaitSeconds` | `900` | Max wait for a single job |
-| `outputRoot` | `''` | Directory where output images land. **Empty means auto-detect** from the launch arguments reported by `/system_stats` — usually you don't need to set it |
+| `outputRoot` | `''` | Directory where output images land. **Empty means auto-detect** from the launch arguments reported by `/system_stats` — usually you don't need to set it. This is the *read* path (used to build on-disk paths and to resolve a relative output directory); the *copy* target is `output.dir` on the settings page |
 
 `comfy_review` details:
 
@@ -177,7 +219,7 @@ Other options (overridable in the same place):
 | --- | --- |
 | `reference_prompt_id` | **Character reference.** Pass the `prompt_id` of a previous render and the review model gets both images, so it can compare hair style / hair colour / eye colour / outfit / palette / overall vibe. Extraneous elements in the reference are explicitly excluded from the requirement |
 | `max_attempts` | Overrides `maxAttempts` from settings (0–5) |
-| `lora` / `lora_strength` | Attach a LoRA when redrawing (requires the LoRA switch), same semantics as `comfy_run` |
+| `lora` / `lora_strength` | Attach a LoRA when redrawing (turn the composer's LoRA chip on first), same semantics as `comfy_run` |
 
 Redraws **keep the base image's dimensions** (rounded to a multiple of 16) — a 768-wide image won't silently become 1024.
 
@@ -186,8 +228,8 @@ Redraws **keep the base image's dimensions** (rounded to a multiple of 16) — a
 Three layers with clear boundaries:
 
 - `lib/comfy.mjs` — pure HTTP client + workflow construction (`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` …), **imports nothing from `@deepseek-ai/*`**, runs standalone
-- `index.js` — the host plugin: registers 8 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and the read-only `GET /api/comfyui/vision-models` route the settings page uses
-- `client.js` — the browser half: registers the "ComfyUI Bridge" page into the `settings.section` slot and reads/writes volatile fields through `configForms`
+- `index.js` — the host plugin: registers 8 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and two read-only routes: `GET /api/comfyui/vision-models` (review models) and `GET /api/comfyui/draw-models` (render models and LoRAs)
+- `client.js` — the browser half, two pieces of UI: the "ComfyUI Bridge" page in the `settings.section` slot (draft + save) and the draw control in `conversation.input.left` (Draw mode only)
 
 `index.js` also does `import z from '@deepseek-ai/schemastery'` to declare `export const Config`, which is why `dependencies` contains that one package and nothing else at runtime.
 
@@ -207,8 +249,14 @@ Why three layers: a bug in workflow construction shouldn't require booting the w
 **Installed, but the tools don't show up?**
 Restart DSH. ESM modules and the profile's bundle list are read at startup, so a `link:` install does nothing until then. If `dsh plugin --profile web list` shows the package but the model has no tools, it's almost always a missing restart.
 
-**The Refresh button does nothing, or the model list is empty?**
+**The model list is empty?**
 That means `GET /api/comfyui/vision-models` isn't reaching the host. First confirm the address shown on the settings page connects (that's the ComfyUI address, not DSH's); then confirm the current session's provider has a vision-capable model. If the list is empty but the plugin is otherwise fine, leave the review `provider` / `model` empty — it falls back to the current session model.
+
+**No draw control at the left of the composer?**
+Then the session isn't in Draw mode — those controls are registered only for sessions whose `agentPreset` is `draw`. Pick **Draw mode** when creating a session; an existing Standard / PTC / Minimal / Create session won't grow them, because a preset is fixed once the conversation starts.
+
+**Pressing Save does nothing?**
+Read the note at the right of the save row: `保存失败` carries a concrete reason (usually `Config field "..." is not volatile`, meaning that field isn't declared volatile and the page can't write it). "unsaved changes" means the draft hasn't been submitted yet, and the button should be enabled.
 
 **`comfy_status` says it can't connect?**
 The plugin looks at `http://127.0.0.1:8188` by default. If ComfyUI runs on another host or port, override `baseUrl` in your profile's `cordis.patch.yml` (see [Configuration](#configuration)).
@@ -230,7 +278,7 @@ npm run selftest              # drive lib/comfy.mjs directly against ComfyUI (re
 npm run probe:route           # fake ctx, verify the vision-model filtering
 npm run probe:http            # real HTTP: verify the route sits inside the trust fence
 npm run probe:features        # real renders: template / img2img / LoRA / upscale + switch gating
-npm run probe:bundle          # verify the client bundle the browser receives contains the new code
+npm run probe:bundle          # verify the client bundle the browser receives contains the new code (DrawBar / save button / both routes)
 ```
 
 The probes that talk to a live DSH (`probe:http` / `probe:bundle`) read their environment from variables and **skip (exit 0)** when it's unavailable, so they don't paint CI red:
@@ -260,9 +308,12 @@ These cost real debugging time; writing them down saves you one round:
 - **Never `export default apply`**: `cordis-plugin-loader`'s `unwrapExports` would grab the bare function, dropping `inject` and the other named exports, and startup fails with `cannot get property "tools" without inject`.
 - **Reload the plugin after editing source**: ESM modules are cached; after changing `lib/*.mjs` you must disable and re-enable the plugin.
 - **Don't edit source files with Chinese text through PowerShell pipes**: `Set-Content` corrupts UTF-8 into an immediate SyntaxError.
-- **Volatile fields are reference objects**: schemastery `.volatile()` fields arrive as cosmokit references inside `apply()`; call `.get()` to unwrap, which is exactly what makes settings-page edits take effect live.
+- **Volatile fields are reference objects**: schemastery `.volatile()` fields arrive as cosmokit references inside `apply()`; call `.get()` to unwrap, which is exactly what makes settings-page and composer edits take effect live. The flip side: **only volatile fields are writable** — the host rejects anything else with `Config field "..." is not volatile`.
 - **img2img uploads first**: `LoadImage` can only read files inside ComfyUI's `input/` directory, so `buildImg2Img` is preceded by `client.uploadImage()` (`POST /upload/image`).
-- **The model list route must use `connection.fetch`**: registering your own `/api/...` with `webServer.register` gets swallowed by the outer prefix router and always returns 401.
+- **The model list routes must use `connection.fetch`**: registering your own `/api/...` with `webServer.register` gets swallowed by the outer prefix router and always returns 401.
+- **Read the session through standard slot props**: a `conversation.input.left` component receives `sessionId` / `useSessions` directly; detect the preset the way the shipped `AgentPresetLabel` does — `state.byId[sessionId].projectionValues.agentPreset` — and pass your own handles in through `inject: (sessionId) => ({...})`.
+- **Don't use `path.isAbsolute` for platform-neutral checks**: it says true for `X:/…` on Windows and false on Linux, so one config yields opposite verdicts. The plugin has `looksAbsolute` (drive-letter form, leading `/`, leading UNC); `output.dir` is resolved through it.
+- **Don't edit `package.json` with `Set-Content -Encoding UTF8`**: it prepends a BOM and `npm test` fails with `SyntaxError: Unexpected token '﻿'`. Use node's `fs.writeFileSync(path, text, 'utf8')`.
 
 ## License
 

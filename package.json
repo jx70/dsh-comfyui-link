@@ -1,7 +1,7 @@
 {
   "name": "dsh-comfyui-link",
-  "version": "1.0.0",
-  "description": "DSH 的 ComfyUI 桥：8 个工具直连本机 ComfyUI，支持文生图 / 图生图 / LoRA / 算法放大 / 自带工作流，并可指定审图模型看后把关、不满自动重画",
+  "version": "1.3.0",
+  "description": "DSH 的 ComfyUI 桥：8 个工具直连本机 ComfyUI，支持文生图 / 图生图 / LoRA / 算法放大 / 自带工作流，并可指定审图模型看后把关、不满自动重画；自带「绘图模式」预设，输入框左侧可选生图模型与 LoRA",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -13,7 +13,8 @@
     "img2img",
     "lora",
     "upscale",
-    "workflow"
+    "workflow",
+    "agent-preset"
   ],
   "license": "MIT",
   "author": "dsh-comfyui-link contributors",
@@ -51,7 +52,7 @@
   ],
   "icon": "./icon.svg",
   "scripts": {
-    "test": "node --test test/graph.test.mjs test/registration.test.mjs test/config.test.mjs",
+    "test": "node --test test/config.test.mjs test/registration.test.mjs test/graph.test.mjs test/output.test.mjs test/picker.test.mjs",
     "smoke": "node scripts/offline.mjs",
     "smoke:live": "node scripts/offline.mjs --live",
     "e2e": "node scripts/e2e.mjs",

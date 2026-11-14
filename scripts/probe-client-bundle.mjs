@@ -3,8 +3,9 @@
  * ============================================================================
  * 之前踩过的坑：改了 client.js、插件也 enable 了，但浏览器可能仍拿旧 bundle
  * （客户端模块按 rev 缓存）。这个脚本用合法 cookie 抓一次首页 HTML，从里面
- * 找出包含 comfyui 的那条合并 bundle URL，取回来检查是否含本轮新增的
- * ModelPicker + /api/comfyui/vision-models。
+ * 找出包含 comfyui 的那条合并 bundle URL，取回来检查本轮新增的东西是否都在：
+ * 设置页的 ModelPicker（审图模型）+ 保存按钮、对话栏的 DrawBar（只在绘图模式
+ * 里渲染）+ 两条只读路由。
  *
  * 环境同 probe-http.mjs：DSH_BASE / DSH_CREDENTIALS / DSH_AUTH_COOKIE。
  * 拿不到凭据就跳过（exit 0）。
@@ -48,14 +49,34 @@ const unescapeHtml = (s) => s.replace(/&amp;/g, '&')
   for (const raw of bundles) {
     const path = raw.startsWith('/') ? raw : `/${raw}`
     const res = await get(path)
-    const hasPicker = res.text.includes('ModelPicker')
-    const hasApi = res.text.includes('/api/comfyui/vision-models')
-    const hasSelect = res.text.includes('data-comfy-select')
+    const marks = {
+      ModelPicker: res.text.includes('ModelPicker'),
+      DrawBar: res.text.includes('DrawBar'),
+      select: res.text.includes('data-comfy-select'),
+      vision: res.text.includes('/api/comfyui/vision-models'),
+      draw: res.text.includes('/api/comfyui/draw-models'),
+      slot: res.text.includes('conversation.input.left'),
+      save: res.text.includes('data-comfy-btn'),
+      // 设置页新加的「输出目录」字段
+      outputDir: res.text.includes('outputDirHint'),
+      // 输出目录那一栏：只读路径行 + 「选择」/「清除」两个按钮 + 打的那条原生对话框路由
+      outputPath: res.text.includes('data-comfy-path'),
+      outputClear: res.text.includes('data-comfy-clear'),
+      pick: res.text.includes('data-comfy-pick'),
+      pickApi: res.text.includes('/api/comfyui/pick-directory'),
+      // 手填框必须已经删掉：TextRow 的 action 分支与它的容器都不该再出现
+      noInline: !res.text.includes('data-comfy-inline'),
+      // 设置页的 LoRA 开关应该已经没了：只剩对话栏那个 chip
+      noSettingsLora: !res.text.includes('loraHint'),
+    }
     console.log(`  ${path.slice(0, 72)}…`)
-    console.log(`    → ${res.status}，${res.text.length} 字节；ModelPicker=${hasPicker} select=${hasSelect} vision-models=${hasApi}`)
-    if (res.status !== 200 || !hasPicker || !hasApi) ok = false
+    console.log(`    → ${res.status}，${res.text.length} 字节；${Object.entries(marks).map(([k, v]) => `${k}=${v}`).join(' ')}`)
+    if (res.status !== 200) ok = false
+    for (const [key, present] of Object.entries(marks)) if (!present) ok = false
   }
 
-  console.log(ok ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker + vision-models 路由' : '\n✗ bundle 内容不是最新代码')
+  console.log(ok
+    ? '\n✓ 浏览器下载的 client.js 已包含 ModelPicker / DrawBar / 三条路由 / 保存按钮 / 输出目录的选择按钮，手填框与设置页 LoRA 都已移除'
+    : '\n✗ bundle 内容不是最新代码')
   process.exit(ok ? 0 : 1)
 })().catch((e) => { console.error(e); process.exit(1) })

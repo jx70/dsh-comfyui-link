@@ -50,7 +50,8 @@ const plugin = await import('../index.js')
 plugin.apply(fakeCtx, {
   baseUrl,
   img2img: { enabled: true },
-  lora: { enabled: true },
+  // 绘图控件里的 LoRA 开关（对话栏那个），不是设置页开关
+  draw: { unet: '', lora: true },
   upscale: { enabled: true },
   review: { enabled: false },
 })

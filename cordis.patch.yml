@@ -7,8 +7,13 @@
 #   dsh plugin --profile web add github:jx70/dsh-comfyui-link
 #   （本地开发：dsh plugin --profile web add link:<插件目录>）
 #
-# 这里只放静态默认值（服务地址等）。审图 / img2img / LoRA / 放大 四个开关
-# 在插件设置页里改，改完热生效、不用重启。
+# 本文件声明两件事：
+#   1) `comfyui` 插件行 —— 只放静态默认值（服务地址等）。审图 / img2img /
+#      放大 三个开关在插件设置页里改；默认生图模型与 LoRA 开关在对话输入框
+#      左侧的「绘图」控件里选。都是 volatile，改完热生效、不用重启。
+#   2) `preset-draw` 行 —— 「绘图模式」，在出厂的标准 / PTC / 极简 / 创造
+#      之外多一个只干出图的预设。子插件名必须是裸包名（@deepseek-ai/...），
+#      相对路径不会被解析层重写。
 # ============================================================================
 
 - insert:
@@ -16,3 +21,64 @@
       name: dsh-comfyui-link
       config:
         baseUrl: 'http://127.0.0.1:8188'
+
+- insert:
+    - id: preset-draw
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: draw
+        name: 绘图模式
+        description: 专注出图：直接描述画面，用本机 ComfyUI 生成并取回图片。
+        order: 5
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你是绘图助手：把用户的话变成一张图，而不是写代码。
+
+                出图流程：
+                1. 先把需求整理成正面提示词：主体 + 风格 + 光线 + 构图 + 画幅。缺关键信息（角色特征、尺寸、风格）时用一句反问补齐，不要自己瞎猜一大段。
+                2. 用 comfy_run（mode="template"）提交，prompt 写完整描述，width/height 用 1024（用户指定则按用户的，取 16 的倍数）。
+                3. 用 comfy_result 取图（单张 wait_seconds 120，多张按张数加），把图给用户看，并简短交代：提示词、尺寸、用的哪个模型。
+
+                常用变体：
+                - 改图：comfy_run mode="img2img" + image_prompt_id（上一张的 prompt_id）+ denoise（0.4 微调、0.75 大改）。
+                - 放大：comfy_upscale。
+                - 按参考图核对角色是否还原：comfy_review + reference_prompt_id。
+                - 查模型 / 节点：comfy_models、comfy_node；看队列：comfy_status。
+
+                生图模型与 LoRA 开关在输入框左侧的绘图控件里选：模型留空就用本机默认扩散模型；LoRA 没开就不要给 comfy_run 传 lora，也不要承诺能挂 LoRA。
+
+                规矩：没有真正拿到 comfy_result 的图，就不要说「已出图」。除出图必需，不写代码、不长篇解释。
+          - id: time-context
+            name: '@deepseek-ai/dsh-time-context'
+          - id: tool-fs
+            name: '@deepseek-ai/dsh-tool-fs'
+            config:
+              applyPatch: false
+          - id: compaction
+            name: cordis:group
+            group: true
+            isolate:
+              compaction: true
+              toolResultPruner: true
+            config:
+              - id: compaction-basic
+                name: '@deepseek-ai/dsh-compaction-basic'
+              - id: command-compact
+                name: '@deepseek-ai/dsh-command-compact'
+              - id: tool-result-pruner
+                name: '@deepseek-ai/dsh-compaction-tool-result-pruner'
+                config:
+                  thresholdChars: 8192
+                  headChars: 4096
+                  tailChars: 1024
+          - id: tool-ask-user
+            name: '@deepseek-ai/dsh-tool-ask-user'
+          - id: tool-todo
+            name: '@deepseek-ai/dsh-tool-todo'
+            config:
+              allowParallelInProgress: true
+          - id: present
+            name: '@deepseek-ai/dsh-tool-present'
