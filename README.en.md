@@ -37,14 +37,14 @@ Nine tools become available to the model:
 | Tool | What it does |
 | --- | --- |
 | `comfy_status` | Is the server alive, how much VRAM is free, what's queued, how the recent jobs went |
-| `comfy_models` | Which model files exist (`diffusion_models` / `text_encoders` / `vae` / `checkpoints` / `loras`) |
+| `comfy_models` | Which model files exist (`diffusion_models` / `text_encoders` / `vae` / `checkpoints` / `loras`). It opens with the **current draw config** (which image model is in use, whether LoRA may be attached, whether a prompt-doc folder is configured), and each LoRA line carries the **character aliases** recognised from the doc next to it |
 | `comfy_node` | Inspect a node class: accepted inputs, defaults, ranges, enum values |
-| `comfy_run` | Submit a job — `mode="template"` txt2img (optionally with a LoRA), `mode="img2img"`, or `mode="graph"` with your own API-format workflow |
+| `comfy_run` | Submit a job — `mode="template"` txt2img (optionally with a LoRA), `mode="img2img"`, or `mode="graph"` with your own API-format workflow. `lora: "auto"` picks one by the character name in `prompt` |
 | `comfy_result` | Wait for the job, fetch the output images, actually show them to the model, report on-disk paths, optionally `save_to` |
 | `comfy_control` | Cancel a job / interrupt the running one / clear the queue / free VRAM |
 | `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity, and `save_to` to keep a copy |
 | `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image, with optional `save_to` |
-| `comfy_lora_doc` | Look inside the LoRA prompt directory: pass `lora` for the matching document (`rest: true` for the part cut by the budget, `full: true` for the whole file), omit it to list everything. It never throws — it just explains the situation |
+| `comfy_lora_doc` | Look inside the LoRA prompt directory: pass `lora` for the matching document's tag blocks and negative block (add `prompt` to preview the pick by relevance; `rest: true` for the blocks left out, `full: true` for the whole file), omit it to list everything. It never throws — it just explains the situation |
 
 ## Draw mode
 
@@ -66,6 +66,40 @@ The dropdown has two groups, and the group decides which loader the workflow use
 
 Both write **immediately** (click and it takes effect — a different contract from the settings page's draft-then-save). They render only in that preset: the check is the session's `agentPreset` projection being `draw`, so other modes never show them, and the model is told that elsewhere it must pass `unet` explicitly and cannot use LoRA.
 
+**The model cannot see what those two controls are set to.** To find out, it calls `comfy_models` — whose first section is the current draw config:
+
+```
+当前绘图配置
+  生图模型：<your model>.safetensors（固定，comfy_run 传 unet 不会覆盖）
+  LoRA：允许挂
+  提示词文档：<your prompt directory>（字数预算 4000；挂了 LoRA 会自动把里面挑中的 tag 段并进 prompt）
+```
+
+Those three lines matter: without them the model can only guess from world knowledge which checkpoint is in use and whether LoRA may be attached — which is exactly how you end up with it comparing Illustrious / 光辉 in its reasoning after you picked anima.
+
+### Drawing a specific character: `lora: "auto"`
+
+`lora` on `comfy_run` / `comfy_review` accepts `"auto"` in addition to a literal file name — it picks a LoRA by the **character name** that appears in `prompt` (`comfy_review` matches against `requirement`).
+
+Matching is alias-based: the file name (`natsume-000016` → `natsume`), the title of the doc sitting in the same folder, and the alternative spellings inside that title's parentheses. So all of these resolve (the heading `四季夏目（四季 ナツメ / Shiki Natsume）` carries Chinese, Japanese and romaji at once):
+
+| You say | Resolves to |
+| --- | --- |
+| `画个四季夏目` / `四季 ナツメ を描いて` / `shiki natsume` | `natsume-000016.safetensors` |
+| `画个因幡巡` / `inaba meguru` | `meguru_anima_base_v1.0.safetensors` |
+| `绫地宁宁` / `Ayachi Nene` | `ayachi-nene-0.2-32.safetensors` |
+| `谷风天音` / `tanikaze amane` | `tenshi_amane.safetensors` |
+| `画个铃` | `belle_anima_v1.safetensors` |
+| `画个美少女` / `summer outfit` | No match — nothing attached, drawing proceeds |
+
+Three rules:
+
+- **Only a unique hit is attached.** Zero matches → the image is still generated, and the result says it could not match any character name, pointing at `comfy_models` for the alias table.
+- **Several matches means none is attached.** `画个四季夏目和因幡巡` lists the candidates (and which alias each one hit) and lets you choose — guessing wrong is worse than not attaching.
+- **Spellings the docs never mention do not match.** A kana form like `カナヲ`, or a romaji abbreviation, will not resolve. Pass the LoRA file name to `lora` directly in that case.
+
+One more thing: **prompt documents are only read when `lora` is passed**. Without it the plugin reads no file at all — and the result says so ("this call passed no lora, so no document was read") rather than letting you assume it did.
+
 The preset declaration ships inside the plugin's own `cordis.patch.yml`, so installing the package installs the mode. To change the persona or the plugin set, override `preset-draw`'s `config.plugins` in the profile patch (the override **replaces** the list wholesale).
 
 ## Requirements
@@ -75,6 +109,8 @@ The preset declaration ships inside the plugin's own `cordis.patch.yml`, so inst
 - The built-in txt2img template has two loading paths: a name from `diffusion_models` goes through `UNETLoader + CLIPLoader + VAELoader` (so `models/text_encoders` and `models/vae` need at least one file each), while a name from `checkpoints` goes through `CheckpointLoaderSimple`, where one all-in-one file is enough (Illustrious / 光辉 style SDXL checkpoints). An empty `diffusion_models` is fine as long as `checkpoints` has something.
 
 ## Install
+
+> **Not on npm yet.** For now it installs from GitHub only — every command below carries the `github:` prefix. Don't use the bare-package-name form of `add`: the registry has no such package and nothing gets installed.
 
 From GitHub:
 
@@ -98,8 +134,6 @@ Uninstall:
 ```bash
 dsh plugin --profile web remove dsh-comfyui-link
 ```
-
-> Not published to npm yet. Don't use the bare-package-name form of `add` — the registry has no such package and nothing gets installed.
 
 ## Usage
 
@@ -195,14 +229,18 @@ The output directory (`output.dir`) has three shapes:
 
 ## LoRA prompt documents
 
-Many character LoRAs ship with their own notes — trigger words, outfits, palette. Drop those documents into one directory and pick it under **LoRA prompts → Prompt directory**: **whenever a LoRA is attached, the plugin reads the directory and picks the document that best fits that LoRA, folding its prompt section into `prompt`**.
+Many character LoRAs ship with their own notes — trigger words, outfits, palette. Drop those documents into one directory and pick it under **LoRA prompts → Prompt directory**: **whenever a LoRA is attached, the plugin reads the directory and picks the document that best fits that LoRA, folding its tag blocks into `prompt` and its `negative:` section into `negative`**.
+
+Prose in those documents (model info, the author's commentary, pitfalls, parameter advice) is **never merged** — it is noise to the encoder and it is what makes a character come out wrong. The plugin decides line by line which lines are actually tags, and takes only those.
 
 | What you do | What happens |
 | --- | --- |
-| `comfy_run` with `lora` | Read every document → score them → take the best one → append its prompt section to `prompt` → the result text says "prompt document: xxx.md (picked by content…; merged into prompt, 3899 / 11085 chars, budget 4000, stopped at a blank line, 7186 chars left out)" |
-| `comfy_run` with `mode="graph"` and a `LoraLoader` in the workflow | Same — every `LoraLoader` / `LoraLoaderModelOnly` node is scanned, its `lora_name` looked up, and a hit is written into the positive `CLIPTextEncode`. No `lora` argument needed |
-| `comfy_review` with `lora` | Same; the redraw keeps the section too, so the second round does not lose the character setup |
+| `comfy_run` with `lora` | Read every document → score them → take the best one → pick its tag blocks line by line and append them to `prompt`, with its `negative:` block merged into `negative` → the result text says "prompt document: xxx.md (picked by content…; merged into prompt, 8/12 tag blocks, 2371 chars (budget 4000), 4 blocks left out…)" |
+| `comfy_run` with `lora: "auto"` | Pick a LoRA by the character name in `prompt` first (Chinese / Japanese / romaji all match — see above), then behave exactly like "with `lora`"; no match or several matches means nothing is attached, with the reason in the result |
+| `comfy_run` with `mode="graph"` and a `LoraLoader` in the workflow | Same — every `LoraLoader` / `LoraLoaderModelOnly` node is scanned, its `lora_name` looked up, and a hit is written into the positive `CLIPTextEncode`; negative tags follow the `KSampler`'s `negative` link to the matching `CLIPTextEncode`. No `lora` argument needed |
+| `comfy_review` with `lora` | Same; the redraw keeps both parts, so the second round does not lose the character setup |
 | pass `lora_doc: "off"` | Skip it for this one call only — the result then says "passed `lora_doc:"off"`, skipped the document" |
+| no `lora` passed (but a directory is configured) | **Not a single file is read**; the result adds "this call passed no lora, so no document was read. To draw a specific character pass `lora:"auto"`, or give `lora` the LoRA file name" |
 | leave the directory empty | **Not a single file is read** — identical to the behaviour before this feature existed; but with a LoRA attached the result still says "no LoRA prompt directory configured, so no document was read" |
 
 **Attaching a LoRA always leaves a trace**: hit, miss, directory not configured, or skipped by `off` — all four end up as one line in the result text, so you never have to guess whether it looked.
@@ -246,11 +284,19 @@ This LoRA was trained on Belle Anima v1 for SDXL.
 masterpiece, 1girl, silver long hair, red eyes, black dress
 ```
 
-With a `# Prompt` / `## Prompt` / `## 提示词` heading only **the section below it** is used (up to the next heading of the same or higher level); without one, the whole file is used. That section is bounded by the **character budget** on the settings page (`loraDocs.maxChars`, default 4000, adjustable 200–20000): over budget it does not cut mid-tag — it walks down the ladder **last blank line → newline → comma/、/semicolon → space**, and a candidate must sit at least 60% into the budget (otherwise the next rung is tried); only when nothing qualifies does it fall back to a hard cut. The result text tells you how many characters were merged, how long the original was, which boundary stopped it, and how much was left out.
+With a `# Prompt` / `## Prompt` / `## 提示词` heading only **the section below it** is looked at (up to the next heading of the same or higher level); without one, the whole file is looked at — but **looking** and **merging** are two different things:
 
-In practice many character documents — Chinese "prompt lists" especially — carry no `#` heading at all, only `【一】` / `【三】`-style section markers. Those count as "no heading", so the whole file is used and the budget decides. The clearer the structure (put the copy-paste tag block under its own heading), the better the text handed to the encoder.
+**Only tag blocks are merged into `prompt`.** The body is split into blocks on blank lines and then judged line by line: a line qualifies only if it is comma/、/semicolon separated, has enough segments, is almost entirely short ASCII fragments, does not end with a full stop, is not Chinese prose, is not a table, and carries no full-width parentheses. Qualifying lines go into `prompt`; everything else (`【一】model info`, the author's commentary, breakdowns, pitfall lists, parameter advice, `作者备注：…`) is skipped. That kills the "the more verbose the document, the dirtier the prompt" trap — for an 11085-character Chinese prompt list the merged result is 8 blocks / 2371 characters of pure tags and **zero CJK characters**.
 
-To see what the plugin actually picked, call `comfy_lora_doc`: with no arguments it lists the candidates (with their subfolder paths and which ones look like prompts); with `lora` it returns the **score table** plus the chosen document's prompt section and reports "merged X chars of Y original / stopped at which boundary"; `rest: true` shows the part that was left out, `full: true` returns the whole file. The tool **never throws** — no directory, a wrong path, or no match all come back as a one-line explanation.
+**Positive and negative are split automatically.** `负面：`, `负面额外加：`, `负面（…）：`, `—— 可用负面词 ——` and `negative prompt:` are all recognised, and the tag blocks under them go into `negative` (merged and de-duplicated with your own negatives, yours first); `正面：` / `positive:` switches back. Section separators (`========`, `【五】`, `▍① …`, `## …`) reset the state, so a negative sub-section sitting in the middle of positive ones cannot bleed.
+
+A few impurities are cleaned along the way: a leading Chinese label (`军装 peaked cap, …` → `peaked cap, …`) and bracketed placeholders (`[在这里写你要的服装标签]`).
+
+The **character budget** (`loraDocs.maxChars` on the settings page, default 4000, adjustable 200–20000) bounds **how many characters of tag text get merged**: blocks are ranked by how well they match *your* `prompt` (mention `pink hair` and the pink-haired outfit goes first), blocks that do not fit are skipped, and the final text is still joined in document order. When only one block qualifies and it alone exceeds the budget, it is cut along the ladder **last blank line → newline → comma/、/semicolon → space**, with a candidate required to sit at least 60% into the budget; only when nothing qualifies does it fall back to a hard cut — so a half tag like `long_hair, blue` never reaches the encoder. The result text reports how many blocks were picked, how many characters that is, how many prose blocks were skipped, and how many negative characters were merged.
+
+In practice many character documents — Chinese "prompt lists" especially — carry no `#` heading at all, only `【一】` / `【三】`-style section markers. Those count as "no heading"; tags are still picked line by line, unaffected.
+
+To see what the plugin actually picked, call `comfy_lora_doc`: with no arguments it lists the candidates (with their subfolder paths and which ones look like prompts); with `lora` it returns the **score table** plus the chosen document's tag blocks and negative block, reporting "how many blocks picked / how many characters / how many prose blocks skipped / how many negative characters"; add `prompt` (the one you intend to use) and it previews the pick by relevance, matching what a render would actually merge; `rest: true` shows the blocks that were left out (or, in plain mode, the tail cut by the budget), `full: true` returns the whole file. The tool **never throws** — no directory, a wrong path, or no match all come back as a one-line explanation.
 
 ## Configuration
 
