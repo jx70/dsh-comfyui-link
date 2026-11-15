@@ -44,7 +44,7 @@ function boot(config = {}) {
  * 这样能把「挂 LoRA → 查文档 → 并入提示词 → 提交」跑到底，不用真的连本机 ComfyUI。
  * 返回 { baseUrl, promptIds, close }。
  */
-function startFakeComfy() {
+function startFakeComfy(overrides = {}) {
   const promptIds = []
   const lists = {
     diffusion_models: ['a.safetensors'],
@@ -52,6 +52,7 @@ function startFakeComfy() {
     vae: ['v.safetensors'],
     checkpoints: [],
     loras: [],
+    ...overrides,
   }
   const server = createServer((req, res) => {
     if (req.method === 'GET' && req.url.startsWith('/models/')) {
@@ -294,40 +295,78 @@ test('comfy_lora_doc：给了 lora 就返回打分表，名字不对齐也能挑
   }
 })
 
-test('comfy_lora_doc：长文档说清并了多少字，rest:true 给出被截掉的后半段', async () => {
+test('comfy_lora_doc：多段 tag 装不下时，rest:true 给出没并进去的那几段', async () => {
   const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-rest-'))
   try {
-    const tags = Array.from({ length: 100 }, (_, i) => `tag_${i}`)
+    // 真实文档的形态：每套服装一整段 tag，段间空行隔开；另有散文段要跳过
+    const outfit = (name, n) =>
+      [`belle_anima_v1, ${name}`, Array.from({ length: n }, (_, i) => `${name}_part_${i}`).join(', ')].join('\n')
     const docText = [
       '这套是 Belle Anima v1 训的。',
       '',
-      '## 提示词',
-      'masterpiece, best quality, 1girl, silver long hair,',
-      tags.join(', '),
+      '【一】模型信息',
+      '作者：某人。训练集 200 张。',
       '',
-      '## 参数建议',
-      'steps 28, cfg 5',
+      '## 提示词',
+      outfit('school', 12),
+      '',
+      outfit('roomwear', 12),
+      '',
+      outfit('battle', 12),
+      '',
+      '【九】踩坑清单',
+      '这一套要额外压短发回流。',
     ].join('\n')
     await writeFile(join(root, 'belle_anima_v1.txt'), docText)
     const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root, maxChars: 300 } })
     const doc = tools.get('comfy_lora_doc')
     const head = await doc.execute({ lora: 'belle_anima_v1.safetensors' }, createExec())
-    assert.match(head.text, /并进 prompt 300 字? ?\/原文|\/ 原文 \d+ 字/)
-    assert.match(head.text, /上限 300/)
+    // 说清「挑了几段 / 共多少字 / 预算多少 / 还有几段没并」
+    assert.match(head.text, /段 tag、共 \d+ 字（预算 300/)
+    assert.match(head.text, /另有 \d+ 段没并/)
     assert.match(head.text, /rest:true/)
     assert.match(head.text, /full:true/)
-    // 默认视图只给收口后的那一段，后半段不在里面
-    assert.doesNotMatch(head.text, /参数建议/)
+    // 散文段绝不进 prompt
+    assert.doesNotMatch(head.text, /训练集 200 张/)
+    assert.doesNotMatch(head.text, /压短发回流/)
+    // 默认视图里「没并进来的那段」不在正文里
+    const headBody = head.text.split('\n\n').slice(-1)[0]
+    assert.ok(!/battle_part_11/.test(headBody), '没并的段不该出现在默认视图正文里')
 
     const rest = await doc.execute({ lora: 'belle_anima_v1.safetensors', rest: true }, createExec())
-    assert.match(rest.text, /后面还剩 \d+ 字没并/)
-    // 后半段确实接着默认视图的末尾
-    assert.match(rest.text, /tag_9\d/)
-    assert.doesNotMatch(rest.text, /masterpiece/)
+    assert.match(rest.text, /另有 \d+ 段没并/)
+    // rest 给的正是没进默认视图的那段
+    const missing = ['school', 'roomwear', 'battle'].filter((name) => !headBody.includes(`${name}_part_11`))
+    assert.ok(missing.length > 0, 'fixture 没造出「装不下的段」')
+    for (const name of missing) assert.match(rest.text, new RegExp(`${name}_part_11`))
 
     const full = await doc.execute({ lora: 'belle_anima_v1.safetensors', full: true }, createExec())
-    assert.match(full.text, /masterpiece/)
-    assert.match(full.text, /参数建议/)
+    assert.match(full.text, /训练集 200 张/)
+    assert.match(full.text, /belle_anima_v1, battle/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('comfy_lora_doc：整篇只有一段超长 tag 时，按边界切到预算内（不整篇白读）', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-one-line-'))
+  try {
+    const tags = Array.from({ length: 100 }, (_, i) => `tag_${i}`)
+    await writeFile(join(root, 'belle_anima_v1.txt'), [
+      '这套是 Belle Anima v1 训的。',
+      '',
+      '## 提示词',
+      `masterpiece, best quality, 1girl, ${tags.join(', ')}`,
+    ].join('\n'))
+    const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root, maxChars: 300 } })
+    const head = await tools.get('comfy_lora_doc').execute({ lora: 'belle_anima_v1.safetensors' }, createExec())
+    // 单段超长 tag 走「整段按边界收口」的 plain 口径：并进多少 / 原文多少 / 切在哪种边界
+    assert.match(head.text, /并进 prompt \d+ \/ 原文 \d+ 字/)
+    assert.match(head.text, /上限 300/)
+    assert.match(head.text, /余下 \d+ 字没并/)
+    // 正文里确实带了开头那几个 tag，而且没超预算
+    assert.match(head.text, /masterpiece, best quality/)
+    assert.doesNotMatch(head.text, /整篇都是空白/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -340,6 +379,33 @@ test('comfy_lora_doc：短文档 rest:true 说明「没有剩余内容」', asyn
     const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root } })
     const result = await tools.get('comfy_lora_doc').execute({ lora: 'belle_anima_v1.safetensors', rest: true }, createExec())
     assert.match(result.text, /没有剩余内容/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test('comfy_lora_doc：传 prompt 就按贴题程度预演，跟 comfy_run 实际并进去的一致', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-lora-probe-'))
+  try {
+    // 两套服装，预算只装得下一套：谁入选完全取决于 prompt 里提到哪个词。
+    // maxChars 的 schema 下限是 200，所以夹具把两段各写到 ~138 字（合计 271 > 200）。
+    const docText = [
+      '## 提示词',
+      ['belle_anima_v1, school', 'school_uniform, yellow necktie, pleated skirt, white socks, loafers, cardigan, hair ribbon, brown hair, twin braids'].join('\n'),
+      '',
+      ['belle_anima_v1, battle', 'battle_uniform, combat boots, fingerless gloves, ammo belt, holster, shoulder pads, tactical vest, silver hair'].join('\n'),
+    ].join('\n')
+    await writeFile(join(root, 'belle_anima_v1.txt'), docText)
+    const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000, loraDocs: { dir: root, maxChars: 200 } })
+    const doc = tools.get('comfy_lora_doc')
+
+    const school = await doc.execute({ lora: 'belle_anima_v1.safetensors', prompt: '1girl, school uniform' }, createExec())
+    assert.match(school.text, /school_uniform/)
+    assert.doesNotMatch(school.text.split('\n\n').slice(-1)[0], /battle_uniform/)
+
+    const battle = await doc.execute({ lora: 'belle_anima_v1.safetensors', prompt: '1girl, battle uniform' }, createExec())
+    assert.match(battle.text, /battle_uniform/)
+    assert.doesNotMatch(battle.text.split('\n\n').slice(-1)[0], /school_uniform/)
   } finally {
     await rm(root, { recursive: true, force: true })
   }
@@ -368,6 +434,146 @@ test('comfy_run / comfy_review 的 lora_doc 只认 auto 与 off', () => {
     const schema = tools.get(name).parameters.properties.lora_doc
     assert.ok(schema, `${name} 没有 lora_doc 参数`)
     assert.deepEqual(schema.enum, ['auto', 'off'])
+  }
+})
+
+test('comfy_models：开头报「当前绘图配置」，LoRA 附角色别名，且不再点名某个模型', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-models-alias-'))
+  const server = await startFakeComfy({ loras: ['natsume-000016.safetensors'], diffusion_models: ['anima-base-v1.0.safetensors'] })
+  try {
+    await writeFile(join(root, '四季夏目_Anima_LoRA_提示词清单.txt'), [
+      '========================================================================',
+      '四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单',
+      '',
+      '## 提示词',
+      'shiki natsume, long light blue hair, yellow eyes, braid',
+    ].join('\n'))
+    await writeFile(join(root, 'natsume-000016.safetensors'), '')
+    const { tools } = boot({
+      baseUrl: server.baseUrl,
+      timeoutMs: 2000,
+      draw: { unet: 'anima-base-v1.0.safetensors', lora: true },
+      loraDocs: { dir: root },
+    })
+    const result = await tools.get('comfy_models').execute({}, createExec())
+    // 模型看不到对话栏选了什么，只能靠这一行知道「到底在用哪个模型」
+    assert.match(result.text, /当前绘图配置/)
+    assert.match(result.text, /生图模型：anima-base-v1\.0\.safetensors/)
+    assert.match(result.text, /不会覆盖/)
+    assert.match(result.text, /LoRA：允许挂/)
+    // LoRA 后面要跟角色别名，否则模型没法把「四季夏目」和 natsume-000016 联系起来
+    assert.match(result.text, /natsume-000016\.safetensors[^\n]*四季夏目/)
+    // 别再往模型脑子里灌「Illustrious / 光辉 更懂 danbooru tag」这类联想
+    const description = tools.get('comfy_models').description
+    assert.doesNotMatch(description, /光辉/)
+    assert.doesNotMatch(description, /Illustrious/i)
+    assert.match(description, /lora:"auto"/)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await server.close()
+  }
+})
+
+test('comfy_run：没传 lora 但配了文档目录 —— 结果里说清「这次没读文档」，并指路 lora:"auto"', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-run-nolora-'))
+  const server = await startFakeComfy()
+  try {
+    await writeFile(join(root, '铃.txt'), '## 提示词\nbellezzz, baseout, black shirt, long sleeves\n')
+    const { tools } = boot({
+      baseUrl: server.baseUrl,
+      timeoutMs: 2000,
+      draw: { unet: 'a.safetensors', lora: true },
+      loraDocs: { dir: root },
+    })
+    const result = await tools.get('comfy_run').execute({ mode: 'template', prompt: 'a cat' }, createExec())
+    assert.match(result.text, /这次没传 lora，没读文档/)
+    assert.match(result.text, /lora:"auto"/)
+    // 没挂 LoRA 时结果里不该出现「LoRA：」那一行
+    assert.doesNotMatch(result.text, /^LoRA：/m)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await server.close()
+  }
+})
+
+test('comfy_run：lora:"auto" 认得出角色就自动挂上，并读该角色的提示词文档', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-run-auto-'))
+  const server = await startFakeComfy({ loras: ['natsume-000016.safetensors', 'belle_anima_v1.safetensors'] })
+  try {
+    await writeFile(join(root, '四季夏目_Anima_LoRA_提示词清单.txt'), [
+      '四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单',
+      '',
+      '## 提示词',
+      'shiki natsume, long light blue hair, yellow eyes, braid, serafuku',
+    ].join('\n'))
+    await writeFile(join(root, 'natsume-000016.safetensors'), '')
+    const { tools } = boot({
+      baseUrl: server.baseUrl,
+      timeoutMs: 2000,
+      draw: { unet: 'a.safetensors', lora: true },
+      loraDocs: { dir: root },
+    })
+    // 用户说的是中文，LoRA 文件名是罗马音 —— auto 要能把两者对上
+    const result = await tools.get('comfy_run').execute(
+      { mode: 'template', prompt: '画个四季夏目，站姿，白背景', lora: 'auto' },
+      createExec(),
+    )
+    assert.match(result.text, /LoRA：natsume-000016\.safetensors/)
+    assert.match(result.text, /四季夏目/)
+    // 文档里的 tag 真的并进了提交的正面提示词
+    const submitted = JSON.parse(server.promptIds[0])
+    const positive = Object.values(submitted.prompt).find(
+      (node) => node.class_type === 'CLIPTextEncode' && node.inputs.text.includes('画个四季夏目'),
+    )
+    assert.ok(positive, '没找到正面 CLIPTextEncode 节点')
+    assert.match(positive.inputs.text, /long light blue hair/)
+    assert.ok(Object.values(submitted.prompt).some((node) => node.class_type === 'LoraLoader'))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await server.close()
+  }
+})
+
+test('comfy_run：lora:"auto" 认不出角色就不挂，并说明「认不出 / 认出多个」', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'comfyui-run-auto-miss-'))
+  const server = await startFakeComfy({ loras: ['natsume-000016.safetensors', 'meguru_anima_base_v1.0.safetensors'] })
+  try {
+    for (const [doc, line] of [
+      ['四季夏目.txt', '四季夏目（四季 ナツメ / Shiki Natsume）'],
+      ['因幡巡.txt', '因幡巡（因幡 めぐる / Inaba Meguru）'],
+    ]) await writeFile(join(root, doc), `${line}\n\n## 提示词\n1girl, solo\n`)
+    await writeFile(join(root, 'natsume-000016.safetensors'), '')
+    await writeFile(join(root, 'meguru_anima_base_v1.0.safetensors'), '')
+    const { tools } = boot({
+      baseUrl: server.baseUrl,
+      timeoutMs: 2000,
+      draw: { unet: 'a.safetensors', lora: true },
+      loraDocs: { dir: root },
+    })
+    // 认不出：不挂，说明原因，不抛错
+    const miss = await tools.get('comfy_run').execute(
+      { mode: 'template', prompt: '画个美少女', lora: 'auto' },
+      createExec(),
+    )
+    assert.match(miss.text, /没认出能对上 loras 名单的角色名/)
+    // 「LoRA：<文件名>」那一行只在真挂上时才有；这里只该有解释
+    assert.doesNotMatch(miss.text, /^LoRA：\S+\.safetensors$/m)
+    // 认出多个：列候选，也不挂 —— 绝不替你猜
+    const both = await tools.get('comfy_run').execute(
+      { mode: 'template', prompt: '画个四季夏目和因幡巡', lora: 'auto' },
+      createExec(),
+    )
+    assert.match(both.text, /认出了 2 个候选/)
+    assert.match(both.text, /natsume-000016\.safetensors/)
+    assert.match(both.text, /不替你猜/)
+    // 两次都没挂 LoRA 节点
+    for (const body of server.promptIds) {
+      const graph = JSON.parse(body)
+      assert.ok(!Object.values(graph.prompt).some((node) => node.class_type === 'LoraLoader'))
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true })
+    await server.close()
   }
 })
 
@@ -442,18 +648,18 @@ test('graph 模式里有 LoraLoader：长文档按边界收口，结果里写明
     assert.match(positive.inputs.text, /silver long hair/)
     const docPart = positive.inputs.text.slice('a girl\n\n'.length)
     assert.ok(docPart.length <= 500, `并进 prompt 的文档段超了上限：${docPart.length}`)
-    // 收口必须落在边界上：并进去的这段是原文的前缀，且原文紧接着的字符是分隔符 —— 没切半个 tag
-    const sourceSection = docText.split('## 提示词\n')[1].trim()
-    assert.ok(sourceSection.startsWith(docPart), '并进的不是原文前缀')
-    const nextChar = sourceSection.slice(docPart.length, docPart.length + 1)
-    assert.ok(nextChar === '' || /[\s,，、;；]/.test(nextChar), `切在字符中间，后面是 ${JSON.stringify(nextChar)}`)
+    // 收口必须落在 tag 边界上：并进去的每一个 tag 都必须是原文里的完整 tag（没切半个）
+    const sourceTags = new Set(docText.split('## 提示词\n')[1].split(/[,\n]/).map((t) => t.trim()).filter(Boolean))
+    const sentTags = docPart.split(/[,\n]/).map((t) => t.trim()).filter(Boolean)
+    assert.ok(sentTags.length > 0, '一个 tag 都没并进去')
+    for (const tag of sentTags) assert.ok(sourceTags.has(tag), `并进去的「${tag}」不是原文里的完整 tag`)
   } finally {
     await rm(root, { recursive: true, force: true })
     await server.close()
   }
 })
 
-test('graph 模式里有 LoraLoader：短文档全篇并入，结果里说「全篇并进去了」', async () => {
+test('graph 模式里有 LoraLoader：短文档全篇并入，结果里说「全挑完了」', async () => {
   const root = await mkdtemp(join(tmpdir(), 'comfyui-graph-doc-short-'))
   const server = await startFakeComfy()
   try {
@@ -478,6 +684,7 @@ test('graph 模式里有 LoraLoader：短文档全篇并入，结果里说「全
     }
     const result = await tools.get('comfy_run').execute({ mode: 'graph', graph }, createExec())
     assert.match(result.text, /铃\.txt/)
+    // 单段 tag 走 plain 口径：短文档「全篇并进去了」
     assert.match(result.text, /全篇并进去了/)
   } finally {
     await rm(root, { recursive: true, force: true })

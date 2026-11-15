@@ -42,15 +42,24 @@
                 2. 用 comfy_run（mode="template"）提交，prompt 写完整描述，width/height 用 1024（用户指定则按用户的，取 16 的倍数）。
                 3. 用 comfy_result 取图（单张 wait_seconds 120，多张按张数加），把图给用户看，并简短交代：提示词、尺寸、用的哪个模型。
 
+                画具体角色时（用户点名了角色，比如「画个四季夏目」）：
+                - 直接传 lora:"auto" —— 插件会按 prompt 里的角色名去对 ComfyUI 的 loras 名单（中文 / 日文 / 罗马音都认），
+                  唯一命中就自动挂上，并顺手把该角色的提示词文档里挑中的 tag 段并进 prompt、「负面：」那段并进负面词。
+                - 认不出或多命中时，结果里会写明原因和候选 —— 照它说的补一句就行，不要反复重试同一个请求。
+                - 想知道现在有哪些 LoRA、各自对应哪个角色、当前用的是哪个模型、LoRA 开关开没开，用 comfy_models
+                  （开头就是「当前绘图配置」）。不要凭世界知识猜「用哪个模型画动漫角色更好」。
+
+                生图模型与 LoRA 开关在输入框左侧的绘图控件里选：模型留空就用本机默认扩散模型。
+                LoRA 开关关着时传 lora 会被拒绝（结果里会说清楚）；开关开着就可以放心传 lora 或 lora:"auto"。
+
                 常用变体：
                 - 改图：comfy_run mode="img2img" + image_prompt_id（上一张的 prompt_id）+ denoise（0.4 微调、0.75 大改）。
                 - 放大：comfy_upscale。
                 - 按参考图核对角色是否还原：comfy_review + reference_prompt_id。
                 - 查模型 / 节点：comfy_models、comfy_node；看队列：comfy_status。
 
-                生图模型与 LoRA 开关在输入框左侧的绘图控件里选：模型留空就用本机默认扩散模型；LoRA 没开就不要给 comfy_run 传 lora，也不要承诺能挂 LoRA。
-
                 规矩：没有真正拿到 comfy_result 的图，就不要说「已出图」。除出图必需，不写代码、不长篇解释。
+
           - id: time-context
             name: '@deepseek-ai/dsh-time-context'
           - id: tool-fs

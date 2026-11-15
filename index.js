@@ -473,9 +473,933 @@ export function extractPromptSection(text, { maxChars = LORA_DOC_MAX_CHARS } = {
   return { text: kept, truncated: true, heading, totalChars, keptChars: kept.length, cut }
 }
 
+// ── 从文档里挑「真正的提示词段」 ─────────────────────────────────────────
+// 现实里的提示词文档很少只有 tag：前面是模型信息表、作者原话、拆解、踩坑清单，
+// 后面才是可以照抄的 tag 块。按顺序截前 N 字，等于优先喂散文、把真正该喂的挤到门外
+// （实测：4000 字预算下 15.7% 是汉字，「可直接复制的完整 prompt」整段在门外）。
+// 所以这里先按行判定「这一行是不是 tag 串」，把 tag 段挑出来，再在预算内拼。
+
+/** 汉字/假名：用来区分「中文叙述」与「英文 tag 串」 */
+const CJK_RE = /[\u3400-\u9FFF\u3040-\u30FF]/
+/** 小标题前面的装饰：`## 负面`、`—— 可用负面词 ——`、`▍负面`、`**负面**`、`==== 负面 ====` */
+const HEAD_DECOR_RE = /^[—\-─═=#*>·▍\s]*/u
+/** 章节分隔行：`## xxx`、`【三】…`、`── A. …`、`▍④ …`、`**xxx**`、`====`、`方案 B：…` */
+const SECTION_RE = /^(?:#{1,6}\s|[【▍·•]|[—\-─═=]{2,}|\*\*|方案\s*[A-Za-z0-9一二三四五六七八九十])/u
+
+/**
+ * 认一行是不是「正面 / 负面」小标题，是的话返回 `{kind, inline}`。
+ *
+ * 真实文档里的写法比想象中花：`负面：`、`负面额外加：`、`负面（这一套要额外压短发回流）：`、
+ * `—— 可用负面词 ——`、`negative prompt:`。共同点是「关键词之后很快就到头」。
+ * 而 `对策：负面里写死 school uniform…` 这种是正文在教你怎么写，不算小标题 ——
+ * 所以关键词后面只允许「短括号 + 额外 + prompt/词 + 冒号或收尾装饰」，不许再跟一整句话。
+ */
+function promptHead(line) {
+  const text = typeof line === 'string' ? line.trim() : ''
+  const decor = HEAD_DECOR_RE.exec(text)?.[0] ?? ''
+  const rest = text.slice(decor.length)
+  const kind = /^(?:可用)?(?:负面|负向|反向|negative)/i.test(rest)
+    ? 'neg'
+    : (/^(?:可用)?(?:正面|正向|positive)/i.test(rest) ? 'pos' : '')
+  if (kind === '') return null
+  const after = rest.replace(/^(?:可用)?(?:负面|负向|反向|negative|正面|正向|positive)/i, '')
+  // 两种小标题写法：
+  // ① 「关键词 + 短修饰 + 冒号」——`负面：`、`负面额外加：`、`负面（这一套要额外压短发回流）：`，
+  //    还有 `负面要加上，防原服装回流：` 这种带一句提醒的（冒号前的修饰不超过 16 字）；
+  // ② 「关键词 + 短修饰 + 装饰收尾」——`—— 可用负面词 ——`、`## 负面`。
+  // `对策：负面里写死 school uniform, yellow necktie, suspender skirt。` 这种正文不算小标题：
+  // 它不以关键词开头；即便真的以关键词开头，冒号前也会带 ASCII 逗号或超过 16 字，两条都不满足。
+  const colonAt = after.search(/[:：]/)
+  const beforeColon = colonAt >= 0 ? after.slice(0, colonAt) : ''
+  const colonOk = colonAt >= 0
+    && beforeColon.length <= 16
+    && /^[\s（()）\u3400-\u9FFF\u3040-\u30FF\w·、，]*$/.test(beforeColon)
+  const bareOk = /^(?:\s*[（(][^）)]{0,40}[）)])?\s*(?:额外(?:加|补)?|追加|附加|补充)?\s*(?:prompt|提示词|词)?\s*(?:[—\-─═]{2,}\s*)?$/i.test(after)
+  if (!colonOk && !bareOk) return null
+  // 行内紧跟 tag（`负面：low quality, blurry`）时把冒号后的部分当 tag
+  const inline = colonOk ? after.slice(colonAt + 1).replace(/^[—\-─═\s]*/u, '').trim() : ''
+  return { kind, inline }
+}
+
+/**
+ * 一行像不像「逗号分隔的 tag 串」（而不是一句中文说明）。
+ * 判据：够长、>= 3 段、不以句号收尾、汉字占比 <= 20%、ASCII 占比 >= 75%、
+ * 段里没有「一句话」（超过 5 个词的段不能太多）、没有表格对齐用的连串空格、
+ * 没有全角括号，且 >= 80% 的段是纯英文 tag（挡掉「中文标签 + tag」混排的说明行）。
+ */
+export function tagishLine(line) {
+  const raw = typeof line === 'string' ? line.trim() : ''
+  // 末尾挂着的分隔符不参与判定：`a, b, c,` 与 `a, b, c` 是同一行
+  const text = raw.replace(/[,，、;；\s]+$/u, '')
+  if (text.length < 8) return false
+  if (/[。！？]$/.test(text)) return false
+  // 全角括号 = 作者在解释怎么用；表格行靠连串空格对齐，这些都不是 tag
+  if (/[（）]/.test(text)) return false
+  if (/\S {3,}\S/u.test(text)) return false
+  const parts = text.split(/[,，、;；]/).map((item) => item.trim()).filter((item) => item.length > 0)
+  if (parts.length < 3) return false
+  const cjk = [...text].filter((ch) => CJK_RE.test(ch)).length
+  if (cjk / text.length > 0.2) return false
+  const ascii = [...text].filter((ch) => /[\x20-\x7E]/.test(ch)).length
+  if (ascii / text.length < 0.75) return false
+  const longParts = parts.filter((part) => part.split(/\s+/).length > 5).length
+  if (longParts * 4 > parts.length) return false
+  // 绝大多数段必须是纯英文 tag：说明行往往「一段中文标签 + 几个 tag」混排
+  const clean = parts.filter((part) => !CJK_RE.test(part)).length
+  return clean * 5 >= parts.length * 4
+}
+
+/** 方括号里夹着中文的占位符：`[在这里写你要的服装标签]`、`【服装】` —— 那是模板，不是 tag */
+const PLACEHOLDER_RE = /[[【][^\]】]*[\u3400-\u9FFF\u3040-\u30FF][^\]】]*[\]】]/u
+
+/**
+ * 把一行洗干净再交给 `tagishLine` 判定：
+ * - 丢掉方括号占位符那一段（`[在这里写你要的服装标签]`）—— 模板槽位不该进 prompt；
+ * - 去掉段首的中文标签（`军装 peaked cap, …` 里的 `军装`）—— 标签是给人看的，
+ *   后面那一串 `peaked cap, black headwear, …` 才是要喂的 tag。
+ * 洗不出东西时返回空串，调用方按「不是 tag 行」处理。
+ */
+function tidyTagLine(line) {
+  const text = typeof line === 'string' ? line.trim() : ''
+  if (text === '') return ''
+  // 全角括号（…）是作者的中文注释（`mole under eye（眼下泪痣是最强识别点）`、
+  // `外套（叠在旗袍/常服后）`），整体剥掉；半角括号 `(hair_flower, red_rose:1.3)`
+  // 是 tag 权重语法，必须保留。
+  let cleaned = text.replace(/[（][^）]*[）]/gu, ' ').trim()
+  // `| 鞋: high heels, …` 里的 `|` 把「鞋」这个中文标签和后面的鞋 tag 切开 ——
+  // 换成逗号让鞋 tag 并进同一串（作者的意思是「这一套的鞋」）。
+  cleaned = cleaned.replace(/\s*\|\s*[\u3400-\u9FFF\u3040-\u30FF]{1,6}\s*[:：]\s*/gu, ', ')
+  const parts = cleaned.split(/[,，、;；]/).map((item) => item.trim()).filter((item) => item.length > 0)
+  const kept = parts.filter((part) => !PLACEHOLDER_RE.test(part))
+  if (kept.length > 0) {
+    const head = kept[0]
+    const label = /^[\u3400-\u9FFF\u3040-\u30FF][\u3400-\u9FFF\u3040-\u30FF\s:：、]*/u.exec(head)
+    if (label) {
+      const rest = head.slice(label[0].length).trim()
+      if (rest === '') kept.shift()
+      else kept[0] = rest
+    }
+  }
+  return kept.join(', ')
+}
+
+/**
+ * 把一篇文档切成「正面 tag 段」与「负面 tag 段」：按空行分块，逐行判定。
+ * `负面：` / `负面额外加：` / `—— 可用负面词 ——` 之后的行算负面，`正面：` 之后算正面；
+ * 没有小标题时按正面算。章节分隔行（`【四】…`、`── B. …`、`## …`、`方案 D：…`）
+ * 会把模式重置回正面 —— 否则一处「负面」会把后面整章的服装 tag 全算成负面。
+ * @returns {{positive:Array<{text:string}>, negative:Array<{text:string}>,
+ *   blocks:number, dropped:number, chars:number, totalChars:number}}
+ *   blocks  —— 原文一共多少块（空行分隔）
+ *   dropped —— 一块里没有任何 tag 行的块数（就是那些散文块，用来算「省下了多少」）
+ *   chars   —— 正面 tag 段合计多少字
+ *   totalChars —— 正文一共多少字（含散文）
+ */
+export function parsePromptBlocks(text) {
+  const { body } = promptBody(text)
+  const blocks = []
+  let current = []
+  for (const line of body.split('\n')) {
+    if (line.trim() === '') {
+      if (current.length > 0) blocks.push(current)
+      current = []
+    } else {
+      current.push(line)
+    }
+  }
+  if (current.length > 0) blocks.push(current)
+  const positive = []
+  const negative = []
+  let dropped = 0
+  // 「正负态」跨块延续：`负面：` 后面空一行接着写 tag，仍是负面；
+  // 但遇到章节标题就归零，否则一整章服装会跟着上一处「负面」变成负面。
+  let mode = 'pos'
+  for (const block of blocks) {
+    const pos = []
+    const neg = []
+    for (const line of block) {
+      const trimmed = line.trim()
+      const head = promptHead(trimmed)
+      if (head) {
+        mode = head.kind
+        const inline = tidyTagLine(head.inline)
+        if (tagishLine(inline)) (head.kind === 'neg' ? neg : pos).push(inline)
+        continue
+      }
+      // 章节标题：`【四】Clothes prompt`、`── B. 常服`、`▍④ CASUAL WEAR`、`## 提示词`、`方案 D：…`
+      // 它本身不是 tag（几乎都带中文说明），但要把「正负态」重置回正面
+      if (SECTION_RE.test(trimmed)) {
+        mode = 'pos'
+        continue
+      }
+      const tag = tidyTagLine(trimmed)
+      if (!tagishLine(tag)) continue
+      if (mode === 'neg') neg.push(tag)
+      else pos.push(tag)
+    }
+    if (pos.length > 0) positive.push({ text: pos.join('\n') })
+    if (neg.length > 0) negative.push({ text: neg.join('\n') })
+    if (pos.length === 0 && neg.length === 0) dropped += 1
+  }
+  const chars = positive.reduce((sum, item) => sum + item.text.length, 0)
+  return { positive, negative, blocks: blocks.length, dropped, chars, totalChars: body.trim().length }
+}
+
+// ── 按「套」切文档：一套衣服一章，章与章互斥 ───────────────────────────────
+// 真实提示词文档里，一套衣服就是一章：`── ① 常服`、`▍② ROOM WEAR（部屋着）`、`一、校服（meguru_school）`。
+// 这些章是互斥的 —— 五套同时并进 prompt，编码器就收到互相打架的服装词（white shirt + maid + waitress
+// + china dress 全在），画出来「不知道穿什么」。所以先切组，再一次只挑一组。
+
+/** 开一个新组的标题行（L1）：`── ① …`、`── A. …`、`① …`、`一、…`、`▍…`、`【…】`、`# …`、`方案 A：…` */
+const GROUP_L1_RES = [
+  /^[-─]{2,}\s*[①②③④⑤⑥⑦⑧⑨⑩]/u,
+  /^[-─]{2,}\s*[A-Z]\.\s/u,
+  /^[①②③④⑤⑥⑦⑧⑨⑩][\s.、·]/u,
+  /^[一二三四五六七八九十]、/u,
+  /^▍/u,
+  /^【[^】]*】/u,
+  /^#{1,6}\s+/u,
+  /^方案\s*[A-Z0-9一二三四五六七八九十]/u,
+  /^[A-Z]\.\s/u,
+]
+/** 组内子块：`【主块】`/`基础结构：` 是正文本身，`【+ 鞋】` 要追加到主块末尾（作者明写「配件块直接接在主块后」） */
+const GROUP_L2_MAIN_RE = /^(?:[【[]\s*主[^】\]]*[】\]]|主块\s*[:：]?|基础结构\s*[:：]?)$/u
+const GROUP_L2_ADD_RE = /^(?:[【[]\s*[+＋][^】\]]*[】\]]|要?加上\s*[:：]?)$/u
+/** 可选项 / 换装变体：不是这一套的正文，丢掉（否则同一套会有两个版本互相打架） */
+const GROUP_L2_ALT_RE = /^(?:可选加|可选|变体|只要|如果想|若是|换成)[^。！？]{0,24}[:：]/u
+/** `※ 完整可用 prompt` / `【拿来就用】`：质量前缀 + 场景的重复品，并进去等于把同一件事说两遍 */
+const GROUP_L2_FULL_RE = /完整\s*(?:可用)?\s*prompt|拿来就用|可直接复制/iu
+const GROUP_NOTE_RE = /^[※★◇◆]/u
+/** 组里带质量前缀的，说明它是「完整 prompt」而不是「纯服装 tag」 */
+const GROUP_QUALITY_RE = /masterpiece|best quality|amazing quality|very aesthetic/i
+/** 元信息章：讲模型 / 参数 / 踩坑的，不是服装，永远不参与挑选 */
+const GROUP_META_RE = /模型|作者原话|参数|踩坑|四个坑|一句话|速查|对照|替换表|对照表|使用规则|换装与串味/u
+/** 角色本体章：发色/瞳色/触发词，必须永远并进去（去掉会掉还原度） */
+const GROUP_ANCHOR_RE = /共通|common|锚点|角色本体|identity|基础结构/i
+/** 用户明确在说「穿什么」的字眼：命中它却没认出服装，就该明说「文档里没有这套」而不是抓一套凑数 */
+const OUTFIT_INTENT_RE = /穿|衣|服|装|裙|鞋|帽|cos|outfit|clothes|wear|uniform|dress|shirt|skirt|bikini|swimsuit/i
+
+/**
+ * 服装同义词桶：文档写「私服」、用户说「便服」，得能对上。
+ * 只收真实文档里出现过的写法（不是通用词典），命中靠「归一后互相包含」。
+ */
+export const OUTFIT_BUCKETS = [
+  ['常服', '私服', '便服', '日常服', 'casual', 'private clothes', 'daily'],
+  ['制服', '校服', 'school uniform', '水手服'],
+  ['女仆', '女仆装', 'maid', 'maid outfit'],
+  ['服务员', '服务生', 'waitress'],
+  ['旗袍', 'china dress', 'chinese clothes'],
+  ['外套', '大衣', 'coat', 'jacket'],
+  ['睡衣', '家居服', '部屋着', 'roomwear', 'pajamas'],
+  ['战斗服', '战斗', 'battle', 'cosplay', '狼耳', '万圣节', '魔女服', '比基尼', 'bikini', '泳装'],
+]
+
+/** 归一到可以互相包含比较的形态：去掉分隔符与括号，全角转半角 */
+function outfitKey(text) {
+  return String(text ?? '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\s_\-·・./\\、，,|｜+＋()（）[\]【】]/gu, '')
+}
+
+/** 两个说法是不是同一套衣服（同桶 / 互相包含） */
+function sameOutfit(a, b) {
+  const x = outfitKey(a)
+  const y = outfitKey(b)
+  if (x === '' || y === '') return false
+  if (x.includes(y) || y.includes(x)) return true
+  for (const bucket of OUTFIT_BUCKETS) {
+    const hitX = bucket.some((item) => { const z = outfitKey(item); return z.length >= 2 && x.includes(z) })
+    const hitY = bucket.some((item) => { const z = outfitKey(item); return z.length >= 2 && y.includes(z) })
+    if (hitX && hitY) return true
+  }
+  return false
+}
+
+/** 组名里的可选名字：`▍① SCHOOL UNIFORM（制服）` → `SCHOOL UNIFORM`、`制服`；`── A. 常服 · 半身像` → `常服`、`半身像` */
+function groupNames(head) {
+  const text = typeof head === 'string' ? head.trim() : ''
+  if (text === '') return []
+  const names = []
+  // 只收「小括号」里的别名（`▍① SCHOOL UNIFORM（制服）`），`（配合旗袍或常服）` 这种
+  // 括号里是用法说明、以「配合/去掉/想去/注意」开头，不算别名。
+  const parens = [...text.matchAll(/[（(]([^）)]*)[）)]/gu)]
+    .map((m) => m[1])
+    .filter((p) => !/^(?:配合|去掉|想去|注意|换掉|非原|要|应|见|作者|不加)/u.test(p.trim()))
+  const main = text
+    .replace(HEAD_DECOR_RE, '')
+    .replace(/^[─\-—=▍【[\]()\s]+/u, '')
+    .replace(/^[①②③④⑤⑥⑦⑧⑨⑩一二三四五六七八九十]+\s*[、.．·]?\s*/u, '')
+    .replace(/^方案\s*[A-Z0-9]+\s*[:：]\s*/iu, '')
+    .replace(/^[A-Z][.、]\s*/u, '')
+    .replace(/[（(][^）)]*[）)]/gu, ' ')
+    .replace(/[─\-—=【】[\]]+/gu, ' ')
+    .replace(/[：:]\s*$/u, '')
+    .trim()
+  // 组名可能写成一串：`belle_anima_v1, school`（触发词 + 服装名）、`常服 · 半身像`（服装 + 构图）。
+  // 逗号 / 中点是分隔，空格不是（`SCHOOL UNIFORM`、`school uniform` 是一个词）。
+  for (const piece of main.split(/\s*[·,，]\s*/u)) if (piece.trim()) names.push(piece.trim())
+  for (const group of parens) {
+    for (const piece of group.split(/[/／·・|｜、]/u)) {
+      const item = piece.trim()
+      if (item !== '' && item.length <= 16 && !/[。！？]/u.test(item)) names.push(item)
+    }
+  }
+  return [...new Set(names)]
+}
+
+/** 行首的中文服装标签：`军装 peaked cap, …` → `军装`（这一行其实是一个组里的「一套」） */
+function lineOutfitLabel(line) {
+  const match = /^([\u3400-\u9FFF\u3040-\u30FF]{1,6})\s+(?=[A-Za-z0-9])/u.exec(line)
+  if (!match) return ''
+  if (/^(?:可选|只要|变体|注意|基础|通用|角色|负面|作者|建议|这套|混写|四套|五套)/u.test(match[1])) return ''
+  return match[1]
+}
+
+/** 软标题：`Base outfit` / `Summer Skies` / `belle_anima_v1, school` —— 短、无标点、下一行就是 tag（铃那种文档全靠这条） */
+function softGroupHead(line, next) {
+  const t = typeof line === 'string' ? line.trim() : ''
+  if (t.length < 2 || t.length > 40) return false
+  if (/[:：。！？]/u.test(t)) return false
+  if (/\S {2,}\S/u.test(t)) return false
+  if (tagishLine(t)) return false
+  if (!tagishLine(next)) return false
+  // 「触发词, 服装名」两段式软标题（belle_anima_v1, school）：两段都必须是单个词、不含空格。
+  // `brown hair, green eyes` 两段都含空格，是 tag 串不是标题。
+  if (/[,，]/u.test(t)) {
+    const parts = t.split(/[,，]/u).map((s) => s.trim()).filter(Boolean)
+    if (parts.length !== 2) return false
+    return parts.every((p) => p.length <= 20 && !/\s/u.test(p))
+  }
+  if (/[,，、;；]/u.test(t)) return false
+  return true
+}
+
+/**
+ * 把文档切成「组」：每组是一套服装（或一个角色本体/元信息章）。
+ * 行级判定顺序是固定的 —— `※ 完整可用 prompt` 必须先按 full 处理再按 note 处理，
+ * 否则那一整条会被当成主块并进去（绫地宁宁 ① 会从 488 字涨到 979 字）。
+ * @returns {{groups:Array<{index:number, head:string, text:string, chars:number, neg:string,
+ *   quality:boolean, meta:boolean, anchor:boolean, names:string[],
+ *   units:Array<{label:string, text:string}>}>, blocks:number, dropped:number, totalChars:number}}
+ */
+export function parseOutfitGroups(text) {
+  const { body } = promptBody(text)
+  const lines = body.split('\n')
+  const groups = []
+  const segmentTags = []
+  let tagsInSegment = 0
+  let blank = true
+  let current = null
+  let part = 'main'
+  let mode = 'pos'
+  const open = (head) => {
+    current = { index: groups.length, head: String(head ?? ''), main: [], add: [], neg: [], units: [] }
+    groups.push(current)
+    part = 'main'
+  }
+  for (let i = 0; i < lines.length; i += 1) {
+    const trimmed = lines[i].trim()
+    if (trimmed === '') {
+      if (!blank) { segmentTags.push(tagsInSegment); tagsInSegment = 0 }
+      blank = true
+      // `part` 是「块内子块」的态（主块 / 追加 / 完整 prompt / 变体 / 备注），
+      // 空行代表换了一个块，part 要回到主块；但 `mode`（正负态）与 `current`（当前组）
+      // 必须跨空行延续 —— `负面：` 后空一行接着写 tag 仍是负面，仍是同一套。
+      part = 'main'
+      continue
+    }
+    blank = false
+    // 装饰行（`====`、`----`、`────`）只做视觉分隔，不是标题也不是内容：
+    // 不改 part/mode/current —— 否则它会把紧跟其后的正文 tag 顶成 note 丢掉
+    // （因幡巡文档就是「标题上下各夹一行 ====」，去掉这层就会丢整节）。
+    if (DECOR_LINE_RE.test(trimmed)) continue
+    const head = promptHead(trimmed)
+    if (head) {
+      mode = head.kind
+      const inline = tidyTagLine(head.inline)
+      if (tagishLine(inline)) {
+        if (!current) open('')
+        tagsInSegment += 1
+        if (head.kind === 'neg') current.neg.push(inline)
+        else current.main.push(inline)
+      }
+      continue
+    }
+    if (GROUP_L2_FULL_RE.test(trimmed)) { part = 'full'; continue }
+    if (GROUP_NOTE_RE.test(trimmed)) { part = 'note'; continue }
+    if (GROUP_L2_ALT_RE.test(trimmed)) { part = 'alt'; continue }
+    if (GROUP_L2_ADD_RE.test(trimmed)) { part = 'add'; continue }
+    if (GROUP_L2_MAIN_RE.test(trimmed)) { part = 'main'; continue }
+    if (GROUP_L1_RES.some((re) => re.test(trimmed))) {
+      open(trimmed)
+      mode = 'pos'
+      continue
+    }
+    const label = lineOutfitLabel(trimmed)
+    const tag = tidyTagLine(trimmed)
+    if (tagishLine(tag)) {
+      if (!current) open('')
+      tagsInSegment += 1
+      if (mode === 'neg') { current.neg.push(tag); continue }
+      if (part === 'full' || part === 'alt' || part === 'note') continue
+      if (part === 'add') { current.add.push(tag); continue }
+      current.main.push(tag)
+      if (label) current.units.push({ label, text: tag })
+      continue
+    }
+    let next = ''
+    for (let j = i + 1; j < lines.length; j += 1) {
+      if (lines[j].trim() !== '') { next = lines[j].trim(); break }
+    }
+    if (softGroupHead(trimmed, next)) { open(trimmed); mode = 'pos'; continue }
+    part = 'note'
+  }
+  if (!blank) segmentTags.push(tagsInSegment)
+  const final = groups.map((group) => {
+    // `part === 'note'` 之后的行仍可能补进主块（`基础结构：` 下一行就是正文），但 note 里的
+    // tag 已经被上面挡住了 —— 这里只负责把 main/add 拼起来
+    const body2 = [...group.main, ...group.add].join('\n')
+    const headless = group.head.trim() === ''
+    const isAnchorHead = !headless && GROUP_ANCHOR_RE.test(group.head)
+    const meta = !headless && !isAnchorHead && GROUP_META_RE.test(group.head)
+    return {
+      index: group.index,
+      head: group.head.trim(),
+      text: body2,
+      chars: body2.length,
+      neg: group.neg.join('\n'),
+      quality: GROUP_QUALITY_RE.test(body2),
+      meta,
+      anchor: (headless || isAnchorHead) && group.units.length < 2,
+      names: groupNames(group.head),
+      units: group.units,
+    }
+  })
+  return {
+    groups: final,
+    blocks: segmentTags.length,
+    dropped: segmentTags.filter((count) => count === 0).length,
+    totalChars: body.trim().length,
+  }
+}
+
+/**
+ * 挑组：先认服装名（组名/别名精确命中，压过同义词），再认同义词，
+ * 再认组内行标签（矢来美羽那种「一章挂五套」）；都认不出就看用户是不是在说衣服 ——
+ * 说了但文档没有 → 只并角色本体；没说 → 拿第一组当默认。
+ * 锚点组（角色本体）永远并入。预算按整组装，装不下就不装（不切半套衣服）。
+ */
+export function chooseOutfitGroups(groups, prompt, limit) {
+  const usable = groups.filter((group) => group.chars > 0 && !group.meta)
+  const anchors = usable.filter((group) => group.anchor)
+  const pool = usable.filter((group) => !group.anchor)
+  const np = outfitKey(prompt)
+  const words = promptWords(prompt)
+  const scoreOf = (group) => words.reduce((sum, word) => sum + (group.text.toLowerCase().includes(word) ? 1 : 0), 0)
+  const hits = []
+  for (const group of pool) {
+    let best = null
+    for (const name of group.names) {
+      const key = outfitKey(name)
+      if (key.length < 2) continue
+      if (np.includes(key)) { best = { rank: 0, how: 'name', name }; break }
+    }
+    if (!best) {
+      for (const name of group.names) {
+        if (sameOutfit(name, prompt)) { best = { rank: 2, how: 'synonym', name }; break }
+      }
+    }
+    if (!best) {
+      for (const unit of group.units) {
+        const key = outfitKey(unit.label)
+        if (key.length < 2) continue
+        if (np.includes(key)) { best = { rank: 0, how: 'label', name: unit.label, unit }; break }
+      }
+    }
+    if (!best) {
+      for (const unit of group.units) {
+        if (sameOutfit(unit.label, prompt)) { best = { rank: 2, how: 'label-synonym', name: unit.label, unit }; break }
+      }
+    }
+    if (best) hits.push({ group, ...best })
+  }
+  let picked = []
+  let how = 'none'
+  let outfit = ''
+  if (hits.length > 0) {
+    // 精确名压过同义词；同档里先要「纯服装 tag」（别把质量前缀重复并进去），再按贴题度、字数取大
+    hits.sort((a, b) => a.rank - b.rank
+      || Number(a.group.quality) - Number(b.group.quality)
+      || scoreOf(b.group) - scoreOf(a.group)
+      || b.group.chars - a.group.chars
+      || a.group.index - b.group.index)
+    const best = hits[0]
+    const text = best.unit ? best.unit.text : best.group.text
+    picked = [{ ...best.group, text, chars: text.length }]
+    how = best.how
+    // 命中「组内行标签」时（矢来美羽/四季夏目那种一章挂多套），报告要说清是哪一套；
+    // 命中组名时用「匹配到的那一个名字片段」——`belle_anima_v1, battle` 只说 `battle`，
+    // 触发词前缀不是服装名。
+    outfit = best.unit ? best.unit.label : (best.name || best.group.head)
+  } else if (OUTFIT_INTENT_RE.test(prompt)) {
+    how = 'none'
+  } else {
+    // 没点名服装：并锚点 + 第一套。若第一组是「一章挂多套」的 units 组，取它的第一个 unit 当默认。
+    const firstUnitGroup = pool.find((group) => group.units.length > 0)
+    const firstSingle = pool.find((group) => group.units.length < 2)
+    if (firstUnitGroup && firstSingle && firstSingle.index < firstUnitGroup.index) {
+      picked = [firstSingle]; how = 'first'; outfit = firstSingle.head
+    } else if (firstUnitGroup) {
+      const unit = firstUnitGroup.units[0]
+      picked = [{ ...firstUnitGroup, text: unit.text, chars: unit.text.length }]
+      how = 'first'
+      outfit = unit.label
+    } else if (firstSingle) {
+      picked = [firstSingle]; how = 'first'; outfit = firstSingle.head
+    }
+  }
+  // 说了服装但文档里没有、而且这篇连角色本体章都没有：至少给一套默认的，别整篇白读
+  if (picked.length === 0 && anchors.length === 0) {
+    const singles = pool.filter((group) => group.units.length < 2)
+    if (singles.length > 0) { picked = [singles[0]]; how = 'none'; outfit = singles[0].head }
+  }
+  const ordered = [...anchors, ...picked].sort((a, b) => a.index - b.index)
+  let used = 0
+  const kept = []
+  const skipped = []
+  for (const group of ordered) {
+    if (used + group.chars <= limit) { kept.push(group); used += group.chars }
+    else skipped.push(group)
+  }
+  const negatives = []
+  for (const group of kept) {
+    for (const item of group.neg.split(/[,，\n]+/u)) {
+      const value = item.trim()
+      if (value !== '' && !negatives.some((old) => old.toLowerCase() === value.toLowerCase())) negatives.push(value)
+    }
+  }
+  return { kept, skipped, used, how, outfit, anchorChars: anchors.reduce((sum, g) => sum + g.chars, 0), negative: negatives.join(', ') }
+}
+
+/** 用户 prompt 里的实词：用来判断「这段 tag 与这次要画的东西有多相关」 */
+const PROMPT_STOP_WORDS = new Set([
+  'the', 'and', 'with', 'very', 'girl', 'solo', 'best', 'quality', 'masterpiece',
+  'looking', 'viewer', 'portrait', 'high', 'low', 'anime', 'illustration',
+])
+
+/** 'masterpiece, best quality, silver hair' → ['silver','hair'] */
+export function promptWords(prompt) {
+  const text = typeof prompt === 'string' ? prompt : ''
+  const words = text
+    .toLowerCase()
+    .split(/[,，、;；\n]/)
+    .flatMap((seg) => seg.replace(/[(){}[\]:]/g, ' ').trim().split(/\s+/))
+    // 纯数字/纯权重的段（`1.2`、`0.8`）不是内容词，别拿它去给段打相关度
+    .filter((word) => word.length >= 3 && !/^[\d.]+$/.test(word) && !PROMPT_STOP_WORDS.has(word))
+  return [...new Set(words)]
+}
+
+/** 把一段 tag 切成集合，用来判断两段是不是「基本同一件事」 */
+function tagSetOf(text) {
+  return new Set(
+    text.toLowerCase().split(/[,，、;；\n]/).map((item) => item.trim()).filter((item) => item.length >= 2),
+  )
+}
+
+/** 两段 tag 的重合度：按较大那段的规模归一，避免「三个词的短段」把整篇都判成重复 */
+function tagOverlap(a, b) {
+  if (a.size === 0 || b.size === 0) return 0
+  let inter = 0
+  for (const item of a) if (b.has(item)) inter += 1
+  return inter / Math.max(a.size, b.size)
+}
+
+/**
+ * 在预算内挑 tag 段：先按与用户 prompt 的词重合度排序（重合多的优先，服装/发型更贴题），
+ * 再按原文顺序拼回去（保持文档的写法），预算装不下就跳过最不相关的那段。
+ * prompt 为空时退化成「按原文顺序取」——comfy_review 没有用户 prompt 走这条路。
+ *
+ * 兜底：如果一段都装不下（只有一段、而且它本身就超预算，常见于「一整行几百个 tag」的文档），
+ * 就取最贴题的那一段、按边界收口切到预算内 —— 绝不能因为「装不下」而整篇不并。
+ *
+ * @returns {{text:string, picked:number, total:number, chars:number, unpicked:string[], partial:boolean}}
+ *   partial=true 表示唯一挑中的那段本身超预算、被按边界切了一刀（其余情况不会切）
+ */
+export function pickPromptBlocks(positive, { maxChars = LORA_DOC_MAX_CHARS, prompt = '' } = {}) {
+  const limit = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : LORA_DOC_MAX_CHARS
+  const words = promptWords(prompt)
+  const scored = positive.map((block, index) => {
+    const lower = block.text.toLowerCase()
+    let score = 0
+    for (const word of words) {
+      if (lower.includes(word)) score += Math.min(4, word.length)
+    }
+    return { ...block, index, score, tags: tagSetOf(block.text) }
+  })
+  scored.sort((a, b) => b.score - a.score || a.index - b.index)
+  const picked = []
+  const unpicked = []
+  let used = 0
+  for (const cand of scored) {
+    if (used + cand.text.length > limit) {
+      unpicked.push(cand.text)
+      continue
+    }
+    // 已经选过一段高度重合的：换装示例/重复列举，跳过（预算留给别的）
+    const duplicate = picked.some((item) => tagOverlap(item.tags, cand.tags) >= 0.5 && cand.score <= item.score)
+    if (duplicate) {
+      unpicked.push(cand.text)
+      continue
+    }
+    picked.push(cand)
+    used += cand.text.length
+  }
+  // 一段都装不下：拿最贴题的那段按边界切，别让整篇白读
+  let partial = false
+  if (picked.length === 0 && scored.length > 0) {
+    const best = scored[0]
+    const cut = extractPromptSection(best.text, { maxChars: limit })
+    if (cut.text.length > 0) {
+      picked.push({ ...best, text: cut.text })
+      used = cut.text.length
+      partial = cut.truncated === true
+      const rest = best.text.slice(cut.text.length)
+      unpicked.length = 0
+      for (const item of scored) unpicked.push(item === best ? rest : item.text)
+    }
+  }
+  picked.sort((a, b) => a.index - b.index)
+  return {
+    text: picked.map((item) => item.text).join('\n\n'),
+    picked: picked.length,
+    total: scored.length,
+    chars: used,
+    unpicked,
+    partial,
+  }
+}
+
+/**
+ * 取一段「真正该并进 prompt」的正文：优先按「套」挑（一次只并一套服装 + 角色本体），
+ * 文档里一个 tag 行都没有时才退回「整段按边界收口」（extractPromptSection），保证旧行为不丢。
+ *
+ * @returns {{mode:'tags'|'plain', text:string, negative:string, heading:string,
+ *   totalChars:number, tagChars:number, keptChars:number, cut:string, truncated:boolean,
+ *   blocks:number, dropped:number, picked:number, pickedTotal:number, unpicked:string[],
+ *   negativeChars:number, outfit:string, how:string, anchorChars:number, skippedGroups:string[]}}
+ *   mode='tags'  → text 是「角色本体 + 一套服装」拼出来的；cut 无意义
+ *   mode='plain' → text 是整段按边界收口的结果，cut 说明切在哪种边界
+ *   outfit       → 挑中的那套服装（组名），how='none' 时为空
+ *   how          → 'name' 组名精确命中 / 'synonym' 同义词命中 / 'label' 组内行标签命中
+ *                  / 'label-synonym' / 'first' 没点名用了第一套 / 'none' 点名了但文档里没有
+ *   truncated    → 「预算装不下，有组没并进去」（skippedGroups 非空）
+ */
+export function composeDocSection(text, { maxChars = LORA_DOC_MAX_CHARS, prompt = '' } = {}) {
+  const limit = Number.isInteger(maxChars) && maxChars > 0 ? maxChars : LORA_DOC_MAX_CHARS
+  const parsed = parseOutfitGroups(text)
+  const { heading } = promptBody(text)
+  const usable = parsed.groups.filter((group) => group.chars > 0 && !group.meta)
+  const pool = usable.filter((group) => !group.anchor)
+  const negativeOf = (groups) => {
+    const out = []
+    for (const group of groups) {
+      for (const item of group.neg.split(/[,，\n]+/u)) {
+        const value = item.trim()
+        if (value !== '' && !out.some((old) => old.toLowerCase() === value.toLowerCase())) out.push(value)
+      }
+    }
+    return out.join(', ')
+  }
+  // 没有可挑的「套」（整篇只有一个 tag 块，或只有角色本体）：走整段按边界收口，
+  // 负面照旧保留。这种文档不存在「多套服装打架」的问题，按套挑是多余的。
+  if (pool.length === 0) {
+    // 连一个 tag 组都没有（纯散文）→ 退回「整篇按边界收口」的旧行为；
+    // 有 tag 组但都是锚点/单段 → 只收那一段 tag，负面照旧。
+    const source = usable.length > 0
+      ? usable.map((group) => group.text).join('\n\n')
+      : text
+    const negative = negativeOf(usable)
+    const section = extractPromptSection(source, { maxChars: limit })
+    return {
+      mode: 'plain',
+      text: section.text,
+      negative,
+      heading,
+      totalChars: parsed.totalChars,
+      tagChars: usable.reduce((sum, group) => sum + group.chars, 0),
+      keptChars: section.keptChars,
+      cut: section.cut,
+      truncated: section.truncated === true,
+      blocks: parsed.blocks,
+      dropped: parsed.dropped,
+      picked: 0,
+      pickedTotal: 0,
+      unpicked: [],
+      negativeChars: negative.length,
+      outfit: '',
+      how: 'none',
+      anchorChars: 0,
+      skippedGroups: [],
+    }
+  }
+  const chosen = chooseOutfitGroups(parsed.groups, prompt, limit)
+  const pickedOutfit = chosen.kept.filter((group) => !group.anchor)
+  // 「没并的套」= 所有没被挑中的服装组（不是预算 skip 的口径）—— k32 一次只挑一套，
+  // 多套文档必然有「没并的套」，rest:true 和结果文案要能把它列出来。
+  const keptIndices = new Set(chosen.kept.map((group) => group.index))
+  const restOutfits = pool.filter((group) => !keptIndices.has(group.index))
+  return {
+    mode: 'tags',
+    text: chosen.kept.map((group) => group.text).join('\n\n'),
+    negative: chosen.negative,
+    heading,
+    totalChars: parsed.totalChars,
+    tagChars: usable.reduce((sum, group) => sum + group.chars, 0),
+    keptChars: chosen.used,
+    cut: '',
+    truncated: restOutfits.length > 0 || chosen.skipped.length > 0,
+    blocks: parsed.blocks,
+    dropped: parsed.dropped,
+    picked: pickedOutfit.length,
+    pickedTotal: pool.length,
+    unpicked: restOutfits.map((group) => group.text),
+    negativeChars: chosen.negative.length,
+    outfit: chosen.outfit,
+    how: chosen.how,
+    anchorChars: chosen.anchorChars,
+    skippedGroups: restOutfits.map((group) => group.head),
+  }
+}
+
 /** 把名字切成词：'Belle Anima v1' → ['belle','anima','v1'] */
 export function nameTokens(name) {
   return normalizeLoraKey(name).split('_').filter((token) => token.length > 0)
+}
+
+// ── 角色别名：把「人说的话」对上「LoRA 文件」 ────────────────────────────────
+// LoRA 文件名可能是英文、罗马音、拼音或纯编号（natsume-000016、tenshi_amane），
+// 用户说的是中文（四季夏目）或日文（四季 ナツメ）。直接把两者对撞是对不上的，
+// 但文档标题行里几乎都写着「中文（日文 / 罗马音）」—— 那就是现成的对照表。
+// 这里只从**已有证据**里取别名（文档标题、文档文件名、LoRA 文件名），不引入词典。
+
+/** 别名匹配时不算数的词：模型泛称、文档体裁词、后缀 */
+const ALIAS_STOP_WORDS = new Set([
+  'anima', 'anime', 'base', 'lora', 'loras', 'illustrious', 'safetensors', 'ckpt', 'model',
+  'models', 'version', 'prompt', 'prompts', 'checkpoint', 'diffusers', 'sdxl', 'best',
+  'solo', 'girl', 'girls', 'resolution', 'quality',
+  // 文档体裁词 / 小节名，出现在文件名或标题里但没有角色信息
+  'trigger', 'words', 'outfit', 'clothes', 'wear', 'variant', 'image',
+  '提示词', '提示词清单', '模型', '清单', '手册', '整理', '说明', '建议', '参数', '作者',
+  '底模', '示例', '用法', '注意', '备注', '一句话', '总结', '对照', '速查',
+])
+
+/** 装饰行：`====`、`----`、`####`、`****` 这类不是标题 */
+const DECOR_LINE_RE = /^[=\-─═#*_\s]{3,}$/
+
+/**
+ * 归一化一条别名或一句提示词，用来做「包含」判断。
+ * 全角转半角、小写、去掉所有分隔符 —— 'Shiki Natsume' 与 'shiki_natsume' 都变成
+ * 'shikinatsume'，这样空格/下划线/中点的写法差异不会影响匹配。
+ */
+export function normalizeAlias(text) {
+  const raw = typeof text === 'string' ? text : ''
+  return raw.normalize('NFKC').toLowerCase().replace(/[\s_\-·・./\\、，,|｜]+/g, '')
+}
+
+/** 一个词够不够当别名的料（停用词、纯数字、太短的英文都不要） */
+function usableAlias(word) {
+  const token = typeof word === 'string' ? word.trim() : ''
+  if (token.length === 0) return false
+  if (ALIAS_STOP_WORDS.has(token.toLowerCase())) return false
+  if (/^[\d.\-_]+$/.test(token)) return false
+  if (/^v\d+(?:\.\d+)*$/i.test(token)) return false
+  if (/[\u3400-\u9FFF\u3040-\u30FF]/.test(token)) return token.length >= 1
+  return token.length >= 3
+}
+
+/** 把一段标题切成候选别名（整段 + 按空白切开的词） */
+function aliasFromPiece(piece, out) {
+  const text = typeof piece === 'string' ? piece.trim() : ''
+  if (text.length === 0) return
+  if (usableAlias(text)) out.push(text)
+  for (const word of text.split(/\s+/)) {
+    if (word === text) continue
+    if (usableAlias(word)) out.push(word)
+  }
+}
+
+/**
+ * 从文档开头几行里读「角色别名」。
+ * 实测的长文档第 2 行几乎都是 `四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单`
+ * 这种写法 —— 括号外是中文，括号里是日文与罗马音（繁简两种中文也常并排出现）。
+ *
+ * @returns {{line:string, aliases:string[]}}
+ *   line    → 取到的那一行（没找到时为空串，方便报告「为什么没认出来」）
+ *   aliases → 中文 / 日文 / 罗马音候选，顺序为「标题本体 → 括号里的各段 → 各段的词」
+ */
+export function docAliases(text) {
+  const body = typeof text === 'string' ? text.replace(/^\uFEFF/, '') : ''
+  const lines = body.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0)
+  const out = []
+  const scan = lines.slice(0, 12)
+  // 只认「第一行非装饰行」，或者退一步认第一个 Markdown 标题。
+  // 不能一路往下找短行：`绝区零 铃.txt` 是「一行英文说明 + 小节名 Base outfit」的结构，
+  // 把 `Base outfit` / `outfit` 当别名会让「summer outfit」这种 prompt 误命中角色 LoRA。
+  const first = scan.find((line) => !DECOR_LINE_RE.test(line)) ?? ''
+  const heading = scan.find((line) => /^#{1,6}\s+\S/u.test(line)) ?? ''
+  for (const line of [first, heading]) {
+    if (line.length === 0) continue
+    const paren = line.match(/[（(]([^）)]{2,160})[）)]/u)
+    if (paren && /[\u3400-\u9FFF\u3040-\u30FF]/.test(line)) {
+      const head = line.slice(0, paren.index).trim()
+      if (head.length > 0) aliasFromPiece(head, out)
+      for (const part of paren[1].split(/[/／·・|｜、]/u)) aliasFromPiece(part, out)
+      return { line, aliases: dedupeAliases(out) }
+    }
+    // 没有括号：短标题、不是成句的说明，才当标题用
+    if (line.length > 60) continue
+    if (/[。！？!?]$/.test(line)) continue
+    if (/^(?:use|add|note|tips?)\b/i.test(line)) continue
+    // 纯 ASCII 的短行分为「名字」（全小写 tsuyuri kanao / deepseek）与「小节名」
+    //（Base outfit / Summer Skies 这种给服装命名的小标题）—— 只收前者，别把小节名当角色
+    const words = line.split(/\s+/).filter(Boolean)
+    const asciiOnly = !/[\u3400-\u9FFF\u3040-\u30FF]/.test(line)
+    if (asciiOnly && words.length > 1 && !words.every((w) => w === w.toLowerCase() || w === w.toUpperCase())) continue
+    const head = line.split(/[:：]/u)[0].trim()
+    if (head.length === 0) continue
+    aliasFromPiece(head, out)
+    return { line, aliases: dedupeAliases(out) }
+  }
+  return { line: '', aliases: dedupeAliases(out) }
+}
+
+/** 别名去重（按归一化后的形式比），保留先出现的写法 */
+function dedupeAliases(list) {
+  const seen = new Set()
+  const out = []
+  for (const item of list) {
+    const key = normalizeAlias(item)
+    if (key.length === 0 || seen.has(key)) continue
+    seen.add(key)
+    out.push(item)
+  }
+  return out
+}
+
+/**
+ * 一个 LoRA 文件都有哪些叫法。三个来源，按可靠性排序：
+ *   1. 文件名自身的词（tenshi_amane → tenshi / amane）
+ *   2. **同一个文件夹里**那篇文档的标题别名（natsume-000016.safetensors 与
+ *      `四季夏目_Anima_LoRA_提示词清单.txt` 并排摆放 → 中文/日文/罗马音全拿到）
+ *   3. 文档文件名本身（`栗花落香奈乎.txt`、`绝区零 铃.txt`）
+ *
+ * @param {string} file LoRA 文件名
+ * @param {Array<{stem:string, raw:string, siblings?:string[]}>} docs 同目录下的文档
+ * @returns {{file:string, aliases:string[], sources:{file:string[], docs:string[]}}}
+ */
+export function loraAliases(file, docs = []) {
+  const key = normalizeLoraKey(file)
+  const fromFile = []
+  for (const token of key.split('_')) {
+    if (usableAlias(token)) fromFile.push(token)
+  }
+  const fromDocs = []
+  for (const doc of Array.isArray(docs) ? docs : []) {
+    const siblings = Array.isArray(doc?.siblings) ? doc.siblings : []
+    if (!siblings.includes(key)) continue
+    const stem = typeof doc?.stem === 'string' ? doc.stem : ''
+    if (stem.length > 0) {
+      for (const piece of stem.split(/[\s_\-]+/u)) {
+        if (usableAlias(piece)) fromDocs.push(piece)
+      }
+      const cjkRuns = stem.match(/[\u3400-\u9FFF\u3040-\u30FF]{1,}/gu) ?? []
+      for (const run of cjkRuns) {
+        if (usableAlias(run)) fromDocs.push(run)
+      }
+    }
+    for (const alias of docAliases(doc?.raw ?? '').aliases) fromDocs.push(alias)
+  }
+  return {
+    file,
+    aliases: dedupeAliases([...fromFile, ...fromDocs]),
+    sources: { file: dedupeAliases(fromFile), docs: dedupeAliases(fromDocs) },
+  }
+}
+
+/**
+ * 按 prompt 里的角色名挑一个 LoRA。**只认唯一命中**：认不出就不猜，认出多个也不猜
+ * （一句话画两个角色的情况交给调用方去问人）。
+ *
+ * @param {string} prompt 用户这次的正面提示词
+ * @param {string[]} loras `index.loras` 的文件名列表
+ * @param {Array<{stem:string, raw:string, siblings?:string[]}>} docs 文档目录里的文档
+ * @returns {{pick:string, candidates:Array<{file:string, aliases:string[], hit:string[]}>,
+ *   reason:string, considered:number}}
+ */
+export function matchLoraForPrompt(prompt, loras = [], docs = []) {
+  const hay = normalizeAlias(prompt)
+  const list = Array.isArray(loras) ? loras : []
+  const candidates = []
+  for (const file of list) {
+    if (typeof file !== 'string' || file.trim().length === 0) continue
+    const table = loraAliases(file, docs)
+    const hit = []
+    for (const alias of table.aliases) {
+      const needle = normalizeAlias(alias)
+      if (needle.length === 0) continue
+      const longEnough = needle.length >= 2
+        || /[\u3400-\u9FFF\u3040-\u30FF]/.test(needle)
+      if (!longEnough) continue
+      if (hay.includes(needle)) hit.push(alias)
+    }
+    if (hit.length > 0) candidates.push({ file, aliases: table.aliases, hit: dedupeAliases(hit) })
+  }
+  if (candidates.length === 1) {
+    return { pick: candidates[0].file, candidates, reason: `按「${candidates[0].hit.join('、')}」认出`, considered: list.length }
+  }
+  if (candidates.length === 0) {
+    return { pick: '', candidates, reason: '没在 prompt 里认出角色名', considered: list.length }
+  }
+  return {
+    pick: '',
+    candidates,
+    reason: `认出了 ${candidates.length} 个候选，不替你猜`,
+    considered: list.length,
+  }
+}
+
+/**
+ * 当前绘图配置 —— 给模型看的那几行。模型看不见输入框左侧的控件，只能靠这里。
+ * 没有这个，它就会凭世界知识猜「用 Illustrious 更懂 danbooru tag」这种事。
+ *
+ * @param {{draw:{unet:string, lora:boolean}, loraDocs:{dir:string, maxChars:number}}} features
+ * @param {Record<string, string[]>} index `client.modelIndex()` 的结果
+ * @returns {string[]}
+ */
+export function describeDrawConfig(features, index = {}) {
+  const draw = features?.draw ?? {}
+  const docs = features?.loraDocs ?? {}
+  const lines = []
+  const fixed = typeof draw.unet === 'string' ? draw.unet.trim() : ''
+  if (fixed.length > 0) {
+    lines.push(`生图模型：${fixed}（固定，comfy_run 传 unet 不会覆盖）`)
+  } else {
+    const diffusion = (index?.diffusion_models ?? [])[0]
+    const checkpoint = (index?.checkpoints ?? [])[0]
+    const fallback = diffusion ?? checkpoint
+    lines.push(fallback
+      ? `生图模型：自动（会用 ${fallback}）`
+      : '生图模型：自动（diffusion_models 与 checkpoints 都是空的，得先装模型）')
+  }
+  lines.push(draw.lora === true
+    ? 'LoRA：允许挂'
+    : 'LoRA：已关（传 lora 会被拒绝 —— 要在输入框左侧的绘图控件里点开）')
+  const dir = typeof docs.dir === 'string' ? docs.dir.trim() : ''
+  lines.push(dir.length > 0
+    ? `提示词文档：${dir}（字数预算 ${docs.maxChars}；挂了 LoRA 会自动把里面挑中的 tag 段并进 prompt）`
+    : '提示词文档：没配目录（挂了 LoRA 也不会读文档）')
+  return lines
 }
 
 /** 内容像不像「逗号分隔的提示词」，而不是一大段说明文字 */
@@ -760,6 +1684,55 @@ export function composeLoraPrompt(prompt, docText) {
   if (extra.length === 0) return base
   if (base.trim().length === 0) return extra
   return `${base.trim()}\n\n${extra}`
+}
+
+/**
+ * 把文档里的负面 tag 并进负面提示词。负面词是逗号分隔的一长串，
+ * 所以按 tag 去重合并（不像正面那样整段换行追加，免得同一批词重复两遍互相抵消）。
+ * 空的一段原样返回另一段。
+ */
+export function composeNegative(negative, docNegative) {
+  const base = typeof negative === 'string' ? negative.trim() : ''
+  const extra = typeof docNegative === 'string' ? docNegative.trim() : ''
+  if (extra.length === 0) return base
+  const seen = new Set()
+  const out = []
+  for (const chunk of [base, extra]) {
+    for (const raw of chunk.split(/[,，\n]/)) {
+      const tag = raw.trim()
+      if (tag.length === 0) continue
+      const key = tag.toLowerCase().replace(/\s+/g, ' ')
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push(tag)
+    }
+  }
+  return out.join(', ')
+}
+
+/**
+ * 找「负面提示词」那个 CLIPTextEncode 的节点 id：从 KSampler 的 negative 输入顺藤摸瓜
+ * （graph 模式里的工作流各家写法不同，不能靠节点序号猜）。摸不到就返回 null，调用方跳过。
+ */
+export function findNegativeNode(graph, positiveId = null) {
+  const nodes = graph && typeof graph === 'object' ? graph : {}
+  const encoders = new Set(
+    Object.entries(nodes)
+      .filter(([, node]) => node?.class_type === 'CLIPTextEncode')
+      .map(([id]) => id),
+  )
+  if (encoders.size === 0) return null
+  for (const node of Object.values(nodes)) {
+    const inputs = node?.inputs
+    if (!inputs || typeof inputs !== 'object') continue
+    const link = inputs.negative
+    if (!Array.isArray(link) || link.length === 0) continue
+    const id = String(link[0])
+    if (!encoders.has(id)) continue
+    if (positiveId !== null && id === String(positiveId)) continue
+    return id
+  }
+  return null
 }
 
 // ── 原生文件夹选择框 ──────────────────────────────────────────────────────
@@ -1064,6 +2037,72 @@ export function apply(ctx, config) {
   }
 
   /**
+   * 给别名匹配准备「文档原文 + 同目录模型」：{ stem, raw, siblings }[]。
+   * 没配目录 / 读不了 / 单篇超大 → 返回空数组（匹配器自己会退化成只看文件名）。
+   * 只读前 LORA_DOC_SCAN_LIMIT 篇，避免目录里塞几百篇时把 IO 打满。
+   */
+  async function loadDocAliasInputs(signal) {
+    let dir = ''
+    try {
+      dir = await resolvedLoraDocDir(signal)
+    } catch {
+      return []
+    }
+    if (dir.length === 0) return []
+    const listed = await readLoraDocs(dir)
+    if (listed.ok !== true) return []
+    const out = []
+    for (const doc of (listed.docs ?? []).slice(0, LORA_DOC_SCAN_LIMIT)) {
+      let raw = ''
+      try {
+        raw = await readFile(doc.file, 'utf8')
+      } catch {
+        continue
+      }
+      out.push({ stem: doc.stem, raw, siblings: doc.siblings ?? [] })
+    }
+    return out
+  }
+
+  /**
+   * 兑现 `lora: "auto"`：拿 ComfyUI 的 loras 名单 + 文档目录里的别名表，按 prompt 挑一个。
+   * `pick` 为空时 `note` 一定非空 —— 调用方把它拼进结果文本，别让人以为是插件忘了挂。
+   *
+   * @returns {{pick:string, note:string}}
+   */
+  async function resolveAutoLora(prompt, signal) {
+    let loras = []
+    try {
+      const index = await client.modelIndex({ signal })
+      loras = index.loras ?? []
+    } catch (error) {
+      return { pick: '', note: `LoRA：lora:"auto" 需要先读 ComfyUI 的 loras 名单，${explain(error)}` }
+    }
+    if (loras.length === 0) {
+      return { pick: '', note: 'LoRA：lora:"auto" 没得挑 —— ComfyUI 的 loras 文件夹是空的。' }
+    }
+    const docs = await loadDocAliasInputs(signal)
+    const matched = matchLoraForPrompt(prompt, loras, docs)
+    if (matched.pick) return { pick: matched.pick, note: '' }
+    if (matched.candidates.length === 0) {
+      return {
+        pick: '',
+        note: `LoRA：prompt 里没认出能对上 loras 名单的角色名（看了 ${matched.considered} 个 lora），这次没挂。`
+          + '要么直接传文件名，要么先调 comfy_models 看有哪些 lora 与别名。',
+      }
+    }
+    const named = matched.candidates
+      .slice(0, 4)
+      .map((item) => `${item.file}（命中「${item.hit.join('、')}」）`)
+      .join('；')
+    return {
+      pick: '',
+      note: `LoRA：prompt 里认出了 ${matched.candidates.length} 个候选（${named}），不替你猜 —— 这次没挂，`
+        + '要挂哪个就把文件名传给 lora。',
+    }
+  }
+
+  /**
    * 给某个 LoRA 挑提示词文档：读目录 → 逐篇打分 → 排序 → 选一篇。
    * 返回 { configured, dir, maxChars, mode, doc, score, reasons, ranked, count, promptish,
    *        scanned, text, truncated, heading, totalChars, keptChars, cut, error, skipped,
@@ -1072,25 +2111,41 @@ export function apply(ctx, config) {
    *   mode='none'      → 都不像，doc 为 null，ranked 里是前几名（给人看为什么没挑中）
    *   totalChars/keptChars/cut → 原文多少字、实际并进 prompt 多少字、切在什么边界
    */
-  async function lookupLoraDoc(loraName, signal) {
+  /**
+   * 给某个 LoRA 挑提示词文档：读目录 → 逐篇打分 → 排序 → 选一篇 → 从里面取 tag 段。
+   * 返回 { configured, dir, maxChars, mode, doc, score, reasons, ranked, count, promptish,
+   *        scanned, text, negative, truncated, heading, totalChars, tagChars, keptChars, cut,
+   *        blocks, dropped, picked, pickedTotal, unpicked, negativeChars,
+   *        error, skipped, stoppedBy, notScanned }：
+   *   configured=false → 设置里没选目录，调用方什么都不用做（一个文件都没读）
+   *   mode='none'      → 都不像，doc 为 null，ranked 里是前几名（给人看为什么没挑中）
+   *   totalChars/keptChars/cut → 原文多少字、实际并进 prompt 多少字、切在什么边界
+   *   prompt           → 用户这次的正面提示词，用来让「服装/发型」这些贴题的 tag 段优先入选
+   */
+  async function lookupLoraDoc(loraName, signal, prompt = '') {
     const features = readFeatureConfig(config).loraDocs
     const maxChars = features.maxChars
+    const empty = {
+      text: '', negative: '', truncated: false, heading: '', totalChars: 0, tagChars: 0,
+      keptChars: 0, cut: '', blocks: 0, dropped: 0, picked: 0, pickedTotal: 0, unpicked: [],
+      negativeChars: 0, outfit: '', how: 'none', anchorChars: 0, skippedGroups: [],
+    }
     const dir = await resolvedLoraDocDir(signal)
     if (dir.length === 0) {
       return {
-        configured: false, dir: '', maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
-        count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '',
-        totalChars: 0, keptChars: 0, cut: '', error: '', skipped: [], stoppedBy: '', notScanned: [],
+        configured: false, dir, maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
+        count: 0, promptish: 0, scanned: 0, error: '', skipped: [], stoppedBy: '', notScanned: [],
+        ...empty,
       }
     }
     const listed = await readLoraDocs(dir)
     if (listed.ok !== true) {
       return {
         configured: true, dir, maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: [],
-        count: 0, promptish: 0, scanned: 0, text: '', truncated: false, heading: '',
-        totalChars: 0, keptChars: 0, cut: '',
+        count: 0, promptish: 0, scanned: 0,
         error: listed.error ?? '读不了目录', skipped: listed.skipped ?? [],
         stoppedBy: '', notScanned: [],
+        ...empty,
       }
     }
     const docs = listed.docs ?? []
@@ -1104,19 +2159,34 @@ export function apply(ctx, config) {
     if (!chosen) {
       return {
         configured: true, dir, maxChars, mode: 'none', doc: null, score: 0, reasons: [], ranked: top,
-        count: docs.length, promptish, scanned: ranked.scanned, text: '', truncated: false,
-        heading: '', totalChars: 0, keptChars: 0, cut: '', error: '', skipped,
+        count: docs.length, promptish, scanned: ranked.scanned, error: '', skipped,
         stoppedBy: ranked.stoppedBy ?? '', notScanned: ranked.notScanned ?? [],
+        ...empty,
       }
     }
-    const section = chosen.section ?? extractPromptSection('', { maxChars })
+    // 取段要看整篇原文（chosen.raw），不能用打分时那段（那是给「像不像提示词」判形态用的）
+    const section = composeDocSection(chosen.raw ?? '', { maxChars, prompt })
     return {
       configured: true, dir, maxChars, mode, doc: chosen.doc, score: chosen.score, reasons: chosen.reasons,
       ranked: top, count: docs.length, promptish, scanned: ranked.scanned,
-      text: section.text, truncated: section.truncated === true, heading: section.heading ?? '',
-      totalChars: Number.isInteger(section.totalChars) ? section.totalChars : section.text.length,
-      keptChars: Number.isInteger(section.keptChars) ? section.keptChars : section.text.length,
-      cut: typeof section.cut === 'string' ? section.cut : '',
+      text: section.text,
+      negative: section.negative,
+      truncated: section.truncated === true,
+      heading: section.heading ?? '',
+      totalChars: section.totalChars,
+      tagChars: section.tagChars,
+      keptChars: section.keptChars,
+      cut: section.cut,
+      blocks: section.blocks,
+      dropped: section.dropped,
+      picked: section.picked,
+      pickedTotal: section.pickedTotal,
+      unpicked: section.unpicked,
+      negativeChars: section.negativeChars,
+      outfit: section.outfit ?? '',
+      how: section.how ?? 'none',
+      anchorChars: section.anchorChars ?? 0,
+      skippedGroups: section.skippedGroups ?? [],
       error: '', skipped,
       stoppedBy: ranked.stoppedBy ?? '', notScanned: ranked.notScanned ?? [],
     }
@@ -1133,16 +2203,32 @@ export function apply(ctx, config) {
 
   /**
    * 把挑中的文档并进 prompt，并把结果写成给人看的一行（没有就返回空串）。
-   * 返回 { prompt, note, budget }：budget 是结构化的预算信息，调用方可原样带走。
+   * 返回 { prompt, negative, note, budget }：
+   *   prompt   —— 要并进正面提示词的 tag 段（可能为空）
+   *   negative —— 文档里「负面：」那段 tag（可能为空），调用方并进 negative prompt
+   *   budget   —— 结构化的预算信息，调用方可原样带走
    */
-  function applyLoraDoc(lookup) {
+  function applyLoraDoc(lookup, { negative = true } = {}) {
     const budget = {
       docName: lookup.doc?.name ?? '',
       mode: lookup.mode ?? 'none',
+      section: lookup.mode === 'none' ? 'none' : (lookup.picked > 0 ? 'tags' : 'plain'),
       kept: lookup.keptChars ?? 0,
       total: lookup.totalChars ?? 0,
+      tagChars: lookup.tagChars ?? 0,
       maxChars: lookup.maxChars ?? LORA_DOC_MAX_CHARS,
       cut: lookup.cut ?? '',
+      truncated: lookup.truncated === true,
+      blocks: lookup.blocks ?? 0,
+      dropped: lookup.dropped ?? 0,
+      picked: lookup.picked ?? 0,
+      pickedTotal: lookup.pickedTotal ?? 0,
+      unpicked: lookup.unpicked ?? [],
+      negativeChars: lookup.negativeChars ?? 0,
+      outfit: lookup.outfit ?? '',
+      how: lookup.how ?? 'none',
+      anchorChars: lookup.anchorChars ?? 0,
+      skippedGroups: lookup.skippedGroups ?? [],
       stoppedBy: lookup.stoppedBy ?? '',
       notScanned: lookup.notScanned ?? [],
       skipped: lookup.skipped ?? [],
@@ -1150,11 +2236,12 @@ export function apply(ctx, config) {
     if (!lookup.configured) {
       return {
         prompt: '',
+        negative: '',
         note: '提示词文档：挂了 LoRA，但设置里没配「LoRA 提示词」目录，这次没查文档。',
         budget,
       }
     }
-    if (lookup.error) return { prompt: '', note: `提示词文档：${lookup.error}`, budget }
+    if (lookup.error) return { prompt: '', negative: '', note: `提示词文档：${lookup.error}`, budget }
     const why = Array.isArray(lookup.reasons) && lookup.reasons.length > 0
       ? `（${lookup.reasons.join('、')}）`
       : ''
@@ -1172,7 +2259,7 @@ export function apply(ctx, config) {
     const tailText = tail.length > 0 ? `；${tail.join('；')}` : ''
     if (!lookup.doc) {
       if (lookup.count === 0) {
-        return { prompt: '', note: `提示词文档：目录里没有文档（${lookup.dir}）${tailText}`, budget }
+        return { prompt: '', negative: '', note: `提示词文档：目录里没有文档（${lookup.dir}）${tailText}`, budget }
       }
       const near = (lookup.ranked ?? [])
         .slice(0, 3)
@@ -1180,6 +2267,7 @@ export function apply(ctx, config) {
         .join('、')
       return {
         prompt: '',
+        negative: '',
         note: `提示词文档：${lookup.count} 篇候选里没有像这个 LoRA 的提示词文档，这次没并入`
           + `（其中 ${lookup.promptish} 篇像提示词）${near ? `；分数最高的几篇：${near}` : ''}`
           + `${tailText}。想自己看一眼用 comfy_lora_doc。`,
@@ -1187,19 +2275,43 @@ export function apply(ctx, config) {
       }
     }
     if (lookup.text.length === 0) {
-      return { prompt: '', note: `提示词文档：${lookup.doc.name} 里没有可用的提示词段${why}${tailText}`, budget }
+      return { prompt: '', negative: '', note: `提示词文档：${lookup.doc.name} 里没有可用的提示词段${why}${tailText}`, budget }
     }
     const prefix = lookup.mode === 'sole'
       ? `提示词文档：${lookup.doc.name}（目录里唯一像提示词的那篇，没明确提到这个 LoRA${why}；已并入 prompt，`
       : `提示词文档：${lookup.doc.name}（按内容挑中${why}；已并入 prompt，`
-    // 截断与否都要报出「原文多少字 / 实际并了多少字」，不能只留一句「已截断」
-    const size = lookup.truncated
-      ? `${budget.kept} / ${budget.total} 字，上限 ${budget.maxChars}，切在${CUT_WORDS[budget.cut] ?? '边界'}，`
-        + `余下 ${Math.max(0, budget.total - budget.kept)} 字没并 —— 想看整篇传 full:true，只看后段传 rest:true`
-      : `${budget.total} 字，全篇并进去了`
+    // 挑段与否都要报出「原文多少字 / 实际并了多少字」，不能只留一句「已截断」。
+    // tags 模式现在按「套」说：并了哪一套服装、锚点多少字；plain 模式报「切在哪种边界」。
+    const outfitNote = budget.section === 'tags'
+      ? (budget.how === 'name' ? `并的是「${budget.outfit}」这一套`
+        : budget.how === 'synonym' || budget.how === 'label' || budget.how === 'label-synonym'
+          ? `并的是「${budget.outfit}」这一套（按你点名的服装）`
+          : budget.how === 'first' ? `没认出服装，用了「${budget.outfit}」这一套`
+            : `文档里没有你点名的这套服装，只并了角色本体 —— 服装段自己写`)
+      : ''
+    const size = budget.section === 'tags'
+      ? (budget.truncated
+        ? `${budget.picked}/${budget.pickedTotal} 套、${budget.kept} 字（上限 ${budget.maxChars}，锚点 ${budget.anchorChars} 字），`
+          + `另有 ${budget.skippedGroups.length} 套没并 —— 想看剩下的套传 rest:true，想看整篇传 full:true`
+        : `${budget.picked} 套服装 + ${budget.anchorChars} 字锚点、共 ${budget.kept} 字，全挑完了`)
+      : (lookup.truncated
+        ? `${budget.kept} / ${budget.total} 字，上限 ${budget.maxChars}，切在${CUT_WORDS[budget.cut] ?? '边界'}，`
+          + `余下 ${Math.max(0, budget.total - budget.kept)} 字没并 —— 想看整篇传 full:true，只看后段传 rest:true`
+        : `${budget.total} 字，全篇并进去了`)
+    // 散文是丢掉了还是留下了，必须说清楚：这正是「画出来不像」的病根
+    const skim = budget.dropped > 0
+      ? `；跳过 ${budget.dropped} 块没有 tag 的说明文字`
+      : ''
+    const neg = lookup.negativeChars > 0
+      ? `；负面 ${lookup.negativeChars} 字并进了 negative prompt`
+      : ''
+    const note = outfitNote
+      ? `${prefix}${outfitNote}，${size}${skim}${neg}${tailText}）`
+      : `${prefix}${size}${skim}${neg}${tailText}）`
     return {
       prompt: lookup.text,
-      note: `${prefix}${size}${tailText}）`,
+      negative: lookup.negative ?? '',
+      note,
       budget,
     }
   }
@@ -1441,9 +2553,11 @@ export function apply(ctx, config) {
   ctx.tools.register({
     name: 'comfy_models',
     description:
-      '列出 ComfyUI 里装了哪些模型文件。内置文生图模板会自动用 diffusion_models 里的第一个；'
-      + 'diffusion_models 是空的话就用 checkpoints 里的整合包（Illustrious / 光辉 这类，一个文件带 MODEL/CLIP/VAE）。'
-      + '要换模型就把这里的文件名传给 comfy_run 的 unet / clip / vae。',
+      '看这台 ComfyUI 上有什么：开头是「当前绘图配置」（现在用的生图模型、LoRA 允不允许挂、'
+      + '提示词文档目录），然后是各文件夹的模型文件清单，loras 会附上角色别名（中文 / 日文 / 罗马音）。'
+      + '画用户点名的角色之前先看这个：在 loras 里找对应文件，把文件名传给 comfy_run 的 lora；'
+      + '不确定就传 lora:"auto"。内置模板用 diffusion_models 里的第一个（三件套加载器），'
+      + '没有就用 checkpoints 里的整合包（一个文件同时带 MODEL/CLIP/VAE）。',
     parameters: params({}),
     output: output(),
     isConcurrencySafe: () => true,
@@ -1454,11 +2568,24 @@ export function apply(ctx, config) {
       } catch (error) {
         throw new Error(explain(error))
       }
-      const lines = ['可用模型：']
+      const features = readFeatureConfig(config)
+      const lines = ['当前绘图配置：']
+      for (const line of describeDrawConfig(features, index)) lines.push(`  ${line}`)
+      // 别名的证据在文档目录里；没配目录（或读不了）就只给文件名，不报错
+      const aliasDocs = await loadDocAliasInputs(exec.signal)
+      lines.push('', '可用模型：')
       for (const folder of MODEL_FOLDERS) {
         const list = index[folder] ?? []
         lines.push(`${folder}：${list.length ? `${list.length} 个` : '（空）'}`)
-        for (const file of list.slice(0, 40)) lines.push(`  - ${file}`)
+        for (const file of list.slice(0, 40)) {
+          if (folder !== 'loras') {
+            lines.push(`  - ${file}`)
+            continue
+          }
+          const table = loraAliases(file, aliasDocs)
+          const extra = table.sources.docs.length > 0 ? ` — ${table.sources.docs.join(' / ')}` : ''
+          lines.push(`  - ${file}${extra}`)
+        }
         if (list.length > 40) lines.push(`  …还有 ${list.length - 40} 个`)
       }
       const missing = ['diffusion_models', 'text_encoders', 'vae'].filter((f) => (index[f] ?? []).length === 0)
@@ -1467,6 +2594,10 @@ export function apply(ctx, config) {
         lines.push('内置模板会优先用 diffusion_models 里的第一个（三件套）；diffusion_models 空的话就用 checkpoints 里的整合包。')
       } else if (missing.length > 0) {
         lines.push(`注意：${missing.join('、')} 是空的，内置模板跑不了（它要这三样，或者一个 checkpoints 整合包）——改用 comfy_run 的 graph 模式传自己的工作流。`)
+      }
+      if ((index.loras ?? []).length > 0) {
+        lines.push('', '画具体角色时，把对应的 lora 文件名传给 comfy_run / comfy_review 的 lora；'
+          + '不确定文件名就传 lora:"auto"，插件会按 prompt 里的角色名挑（中/日/罗马音都认，唯一命中才挂）。')
       }
       return { text: lines.join('\n') }
     },
@@ -1564,12 +2695,14 @@ export function apply(ctx, config) {
       unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包。注意：对话栏左侧选中的模型优先，这里传的 unet 只在那边选的是「自动」时才生效；想临时换模型请让用户在对话栏里改'),
       clip: s('文本编码器文件名，省略用 text_encoders 里第一个'),
       vae: s('VAE 文件名，省略用 vae 里第一个'),
-      lora: s('LoRA 文件名（template 模式）。要先在对话栏左侧把 LoRA 开关打开；文件名用 comfy_models 查 loras 文件夹'),
+      lora: s('LoRA 文件名（template 模式）。要先在对话栏左侧把 LoRA 开关打开；文件名用 comfy_models 查 loras 文件夹。'
+        + '画具体角色但不知道挂哪个，就传 "auto" —— 插件按 prompt 里的角色名去对 loras 名单（中文 / 日文 / 罗马音都认），'
+        + '唯一命中才挂；认不出或认出多个都会在结果里说明，不会瞎挂'),
       lora_strength: n('LoRA 强度，默认 0.8'),
       lora_doc: {
         type: 'string',
         enum: ['auto', 'off'],
-        description: 'auto（默认）= 挂 LoRA 时读设置里的「LoRA 提示词」目录，按内容挑最像这个 LoRA 的那篇，把提示词段并进 prompt；off = 这次不查（设置里没选目录时本来就什么都不读）',
+        description: 'auto（默认）= 挂 LoRA 时读设置里的「LoRA 提示词」目录，按内容挑最像这个 LoRA 的那篇，把里面的 tag 段并进 prompt、「负面：」那段并进 negative prompt；off = 这次不查（设置里没选目录时本来就什么都不读）',
       },
       image_prompt_id: s('img2img 模式的底图来源：之前出图的 prompt_id'),
       denoise: n('img2img 的 denoise，默认 0.6。越小越贴近原图，越大改得越狠'),
@@ -1615,16 +2748,22 @@ export function apply(ctx, config) {
             loraDocNote = '提示词文档：这次传了 lora_doc:"off"，跳过了文档。'
           } else {
             const notes = []
+            // 正面写进 prompt_node / 第一个 CLIPTextEncode；负面写进 KSampler 的 negative 那一支
+            const positiveTarget = injectedNode
+              ?? Object.entries(graph).find(([, n]) => n.class_type === 'CLIPTextEncode')?.[0]
+            const negativeTarget = findNegativeNode(graph, positiveTarget)
             for (const loraName of loraNames) {
-              const lookup = await lookupLoraDoc(loraName, signal)
+              const lookup = await lookupLoraDoc(loraName, signal, args.prompt ?? '')
               const applied = applyLoraDoc(lookup)
               if (applied.prompt.length > 0) {
-                const target = injectedNode
-                  ?? Object.entries(graph).find(([, n]) => n.class_type === 'CLIPTextEncode')?.[0]
-                if (target) {
-                  const node = graph[target]
+                if (positiveTarget) {
+                  const node = graph[positiveTarget]
                   node.inputs = { ...node.inputs, text: composeLoraPrompt(node.inputs?.text ?? '', applied.prompt) }
                 }
+              }
+              if (applied.negative.length > 0 && negativeTarget) {
+                const node = graph[negativeTarget]
+                node.inputs = { ...node.inputs, text: composeNegative(node.inputs?.text ?? '', applied.negative) }
               }
               if (applied.note) notes.push(applied.note)
             }
@@ -1645,8 +2784,28 @@ export function apply(ctx, config) {
           if (!args.image_prompt_id) {
             throw new Error('mode="img2img" 必须给 image_prompt_id（底图来源，之前出图的 prompt_id）')
           }
-        } else if (args.lora && !features.draw.lora) {
-          throw new Error('LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
+        }
+
+        // lora:"auto" —— 按 prompt 里的角色名挑一个（中/日/罗马音别名都认）。
+        // 只认唯一命中：认不出就继续出图并说明，认出多个就列候选让人挑，绝不瞎挂。
+        // 放在「门」校验之前，是为了让报错里能说清「auto 挑中了哪个」。
+        // 挑不中时必须把 args.lora 清成 undefined —— 否则后面会拿字符串 "auto" 当文件名，
+        // 既去查一篇「叫 auto 的 LoRA」的文档，还会在工作流里插一个 lora_name="auto" 的节点。
+        let autoLora = ''
+        if (args.lora === 'auto') {
+          const resolvedAuto = await resolveAutoLora(args.prompt ?? '', signal)
+          autoLora = resolvedAuto.pick
+          if (resolvedAuto.pick) args = { ...args, lora: resolvedAuto.pick }
+          else {
+            args = { ...args, lora: undefined }
+            loraDocNote = resolvedAuto.note
+          }
+        }
+
+        if (args.lora && !features.draw.lora) {
+          throw new Error(autoLora
+            ? `LoRA 没开启：lora:"auto" 挑中了 ${autoLora}，但输入框左侧的 LoRA 开关是关的 —— 让用户点开再来。`
+            : 'LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
         }
 
         // 挂 LoRA 时先看一遍提示词文档（纯本地读文件，不联网），
@@ -1656,11 +2815,15 @@ export function apply(ctx, config) {
           if ((args.lora_doc ?? 'auto') === 'off') {
             loraDocNote = '提示词文档：这次传了 lora_doc:"off"，跳过了文档。'
           } else {
-            const lookup = await lookupLoraDoc(args.lora, signal)
+            const lookup = await lookupLoraDoc(args.lora, signal, args.prompt ?? '')
             const applied = applyLoraDoc(lookup)
             loraDocNote = applied.note
             if (applied.prompt.length > 0) {
               args = { ...args, prompt: composeLoraPrompt(args.prompt, applied.prompt) }
+            }
+            // 文档里的「负面：」那段并进 negative prompt，不再只喂正面
+            if (applied.negative.length > 0) {
+              args = { ...args, negative: composeNegative(args.negative ?? DEFAULT_NEGATIVE, applied.negative) }
             }
           }
         }
@@ -1754,6 +2917,10 @@ export function apply(ctx, config) {
       }
       // 挂 LoRA 时把文档那笔账交代清楚：命中了哪篇 / 没命中 / 目录没配
       if (loraDocNote) lines.push(loraDocNote)
+      // 没挂 LoRA 也别装没事：配了文档目录却说不知道该挂谁，是最容易「图不像」的场景
+      if (!loraDocNote && !args.lora && (mode === 'template' || mode === 'img2img') && features.loraDocs.dir) {
+        lines.push('提示词文档：这次没传 lora，没读文档。画具体角色就传 lora:"auto"（按角色名挑），或直接把 LoRA 文件名给 lora。')
+      }
       lines.push('')
       lines.push(`输出目录：${
         features.output.dir
@@ -1970,12 +3137,13 @@ export function apply(ctx, config) {
       requirement: s('用户最初的要求，审图就按这个判'),
       reference_prompt_id: s('角色参考图来源：之前出图的 prompt_id。给了就把它一并交给审图模型，用来比对角色是否还原'),
       max_attempts: i('最多重生成几次（不含首次），省略用设置页里的值'),
-      lora: s('重画时挂的角色 LoRA 文件名（要先在输入框左侧的绘图控件里把 LoRA 打开）。留空则不带 LoRA'),
+      lora: s('重画时挂的角色 LoRA 文件名（要先在输入框左侧的绘图控件里把 LoRA 打开）。留空则不带 LoRA；'
+        + '传 "auto" 就按 requirement 里的角色名挑一个（中/日/罗马音都认，认不出或认出多个都会说明）'),
       lora_strength: n('LoRA 强度，默认 0.8'),
       lora_doc: {
         type: 'string',
         enum: ['auto', 'off'],
-        description: 'auto（默认）= 挂 LoRA 时按内容挑出「LoRA 提示词」目录里最像这个 LoRA 的那篇，把提示词段并进重画提示词；off = 这次不查',
+        description: 'auto（默认）= 挂 LoRA 时按内容挑出「LoRA 提示词」目录里最像这个 LoRA 的那篇，把里面的 tag 段并进重画提示词、「负面：」那段并进负面词；off = 这次不查',
       },
       save_to: s('把最终那张图另存到这个目录（会自己建目录）。省略就用设置页配的输出目录；两边都空就不额外复制'),
     }, ['prompt_id', 'requirement']),
@@ -2006,21 +3174,32 @@ export function apply(ctx, config) {
         }
         return { width: 1024, height: 1024 }
       })()
-      const lora = args.lora
-      if (lora && !features.draw.lora) {
-        throw new Error('LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
-      }
       // 挂 LoRA 就先把提示词文档看一遍（设置里没选目录时一个文件都不读，但结果会交代）
       let loraDocNote = ''
       let loraDocPrompt = ''
+      let loraDocNegative = ''
+      // lora:"auto" —— 按「用户最初的要求」里提到的角色名挑一个（中/日/罗马音别名都认）。
+      // 只认唯一命中：认不出就照常重画并在结果里说明，认出多个就列候选，绝不瞎挂。
+      let lora = args.lora === 'auto' ? '' : args.lora
+      if (args.lora === 'auto') {
+        const resolvedAuto = await resolveAutoLora(args.requirement ?? '', signal)
+        lora = resolvedAuto.pick
+        if (!lora) loraDocNote = resolvedAuto.note
+      }
+      if (lora && !features.draw.lora) {
+        throw new Error(args.lora === 'auto'
+          ? `LoRA 没开启：lora:"auto" 挑中了 ${lora}，但输入框左侧的 LoRA 开关是关的 —— 让用户点开再来。`
+          : 'LoRA 没开启：在输入框左侧的绘图控件里把 LoRA 打开再来。')
+      }
       if (lora) {
         if ((args.lora_doc ?? 'auto') === 'off') {
           loraDocNote = '提示词文档：这次传了 lora_doc:"off"，跳过了文档。'
         } else {
-          const lookup = await lookupLoraDoc(lora, signal)
+          const lookup = await lookupLoraDoc(lora, signal, args.requirement ?? '')
           const applied = applyLoraDoc(lookup)
           loraDocNote = applied.note
           loraDocPrompt = applied.prompt
+          loraDocNegative = applied.negative
         }
       }
       const reviewLog = []
@@ -2059,7 +3238,7 @@ export function apply(ctx, config) {
         const graph = buildTxt2Img({
           ...models,
           prompt: drawPrompt,
-          negative: DEFAULT_NEGATIVE,
+          negative: composeNegative(DEFAULT_NEGATIVE, loraDocNegative),
           width: size.width,
           height: size.height,
           batch: 1,
@@ -2161,13 +3340,14 @@ export function apply(ctx, config) {
       + '给 lora 就按内容打分（文件名像不像、正文提没提到、内容像不像提示词）挑最像的那篇并给出打分表；'
       + '不给 lora 就列出目录里的候选。'
       + '目录在插件设置页里选；没选目录、目录不存在、挑不中、读不了都只是说明情况，不会报错。'
-      + 'comfy_run / comfy_review 挂 LoRA 时会自动做同样的事并把提示词段并进 prompt，'
+      + 'comfy_run / comfy_review 挂 LoRA 时会自动做同样的事并把 tag 段并进 prompt，'
       + '这个工具是用来「先看一眼」或者看全文的。'
-      + '文档超过字数上限时默认只并入收口后的那一段，余下的部分用 rest: true 看、整篇用 full: true 看。',
+      + '文档超过字数预算时默认只并入收口后的那几段，余下的部分用 rest: true 看、整篇用 full: true 看。',
     parameters: params({
       lora: s('LoRA 文件名（如 belle_anima_v1.safetensors）。省略则列出目录里的候选文档'),
+      prompt: s('你打算用的正面提示词。给了就按「贴题程度」预演一遍挑段结果，跟 comfy_run 实际并进去的一致；不给就按原文顺序挑'),
       full: { type: 'boolean', description: 'true 时返回挑中那篇的全文（不截断），默认只给提示词段' },
-      rest: { type: 'boolean', description: 'true 时返回「超过字数上限、没并进 prompt」的那部分原文（full 优先）' },
+      rest: { type: 'boolean', description: 'true 时返回「超过字数预算、没并进 prompt」的那部分原文（full 优先）' },
     }, []),
     output: output(),
     isConcurrencySafe: () => true,
@@ -2195,6 +3375,7 @@ export function apply(ctx, config) {
       const skipped = [...(listed.skipped ?? [])]
       const maxChars = features.loraDocs.maxChars
       const lora = typeof args.lora === 'string' ? args.lora.trim() : ''
+      const probe = typeof args.prompt === 'string' ? args.prompt.trim() : ''
       if (lora.length === 0) {
         if (docs.length === 0) {
           return { text: `目录里没有可用的文档：${resolved}\n认的扩展名是 .md / .markdown / .txt，最多往下走 ${LORA_DOC_MAX_DEPTH} 层。` }
@@ -2258,14 +3439,33 @@ export function apply(ctx, config) {
             raw.replace(/^\uFEFF/, '').trim()].join('\n'),
         }
       }
-      const section = chosen.section
+      const section = composeDocSection(raw, { maxChars, prompt: probe })
       if (section.text.length === 0) {
         return { text: `${chosen.doc.name} 里没有可用的提示词内容（整篇都是空白）。` }
       }
-      const totalChars = Number.isInteger(section.totalChars) ? section.totalChars : section.text.length
-      const keptChars = Number.isInteger(section.keptChars) ? section.keptChars : section.text.length
+      const totalChars = section.totalChars
+      const keptChars = section.keptChars
       const cutWord = CUT_WORDS[section.cut] ?? '边界'
+      const head = `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`
+      const negLine = section.negativeChars > 0
+        ? `负面：${section.negativeChars} 字（挂 LoRA 出图时会并进 negative prompt）`
+        : ''
       if (args.rest === true) {
+        // tags 模式没有「后半段」：被落下的是「没挑中的段」，逐段列出来
+        if (section.mode === 'tags') {
+          if (section.unpicked.length === 0) {
+            return { text: [head, `这篇没有剩余内容 —— ${section.pickedTotal} 段 tag（${keptChars} 字）全在预算 ${maxChars} 之内，全挑完了。`].join('\n') }
+          }
+          return {
+            text: [
+              head,
+              `并进 prompt 的是 ${section.picked}/${section.pickedTotal} 段 tag、共 ${keptChars} 字（预算 ${maxChars}）；`
+                + `另有 ${section.unpicked.length} 段没并：`,
+              '',
+              section.unpicked.join('\n\n'),
+            ].join('\n'),
+          }
+        }
         const { body } = promptBody(raw)
         const trimmed = body.trim()
         // keptChars 之后就是被收口掉的那一段。数量按原文算（正好等于 total - kept），
@@ -2273,39 +3473,50 @@ export function apply(ctx, config) {
         const restText = trimmed.slice(keptChars)
         const restShown = restText.replace(/^[\s,，、;；]+/u, '')
         if (restText.length === 0) {
-          return {
-            text: [
-              `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
-              `这篇没有剩余内容 —— 全篇 ${totalChars} 字都在上限 ${maxChars} 之内。`,
-            ].join('\n'),
-          }
+          return { text: [head, `这篇没有剩余内容 —— 全篇 ${totalChars} 字都在上限 ${maxChars} 之内。`].join('\n') }
         }
         return {
           text: [
-            `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
+            head,
             `并进 prompt 的是前 ${keptChars} 字（上限 ${maxChars}，切在${cutWord}）；后面还剩 ${restText.length} 字没并：`,
             '',
             restShown,
           ].join('\n'),
         }
       }
-      const sizeLine = section.truncated
-        ? `字数：并进 prompt ${keptChars} / 原文 ${totalChars} 字（上限 ${maxChars}，切在${cutWord}；余下 ${Math.max(0, totalChars - keptChars)} 字没并）`
-        : `字数：${totalChars} 字（全篇并进去了）`
+      // 挑段模式下「字」的口径是「tag 段挑了多少」，跟「整篇切到多少」不是一回事，要分开说
+      const sizeLine = section.mode === 'tags'
+        ? (section.truncated
+          ? `字数：${section.picked}/${section.pickedTotal} 段 tag、共 ${keptChars} 字（预算 ${maxChars}；另有 ${section.unpicked.length} 段没并）\n`
+            + `原文 ${totalChars} 字里有 ${section.tagChars} 字是 tag 段，其余 ${section.dropped} 块说明文字不会并进 prompt`
+          : `字数：${section.picked} 段 tag、共 ${keptChars} 字（预算 ${maxChars}，全挑完了）\n`
+            + `原文 ${totalChars} 字里跳过 ${section.dropped} 块说明文字`)
+        : (section.truncated
+          ? `字数：并进 prompt ${keptChars} / 原文 ${totalChars} 字（上限 ${maxChars}，切在${cutWord}；余下 ${Math.max(0, totalChars - keptChars)} 字没并）`
+          : `字数：${totalChars} 字（全篇并进去了）`)
       const restHint = section.truncated
-        ? '想看被截掉的后半段传 rest:true；想看整篇原文传 full:true。'
+        ? (section.mode === 'tags'
+          ? '想看没挑中的那几段传 rest:true；想看整篇原文传 full:true。'
+          : '想看被截掉的后半段传 rest:true；想看整篇原文传 full:true。')
         : ''
+      const sourceLine = section.mode === 'tags'
+        ? (section.heading
+          ? `取的段落：${section.heading} 下的 ${section.picked} 段 tag（散文行按行判定后跳过）`
+          : `取的段落：${section.picked} 段 tag（文档里没有「# 提示词」小标题也能挑；散文行按行判定后跳过）`)
+        : (section.heading ? `取的段落：${section.heading}` : '取的段落：全文（没找到「提示词 / Prompt」小标题）')
       return {
         text: [
-          `挑中：${chosen.doc.name}（${mode === 'sole' ? '目录里唯一像提示词的那篇' : '按内容匹配'}，${chosen.score} 分）`,
+          head,
           ...table,
           '',
-          section.heading ? `取的段落：${section.heading}` : '取的段落：全文（没找到「提示词 / Prompt」小标题）',
+          sourceLine,
           sizeLine,
+          ...(negLine ? [negLine] : []),
           ...(restHint ? [restHint] : []),
           ...(skipped.length > 0 ? ['', '跳过的：', ...skipped.map((item) => `  ${item}`)] : []),
           '',
           section.text,
+          ...(section.negative ? ['', '── 负面（negative prompt）──', section.negative] : []),
         ].join('\n'),
       }
     },
@@ -2489,9 +3700,13 @@ export function apply(ctx, config) {
               '文生图直接用 comfy_run 的 template 模式写 prompt；要更复杂的图先 comfy_node 查节点再走 graph 模式。',
               '「绘图模式」的会话里，输入框左侧有绘图控件：默认生图模型与 LoRA 开关都在那里选，' +
                 '模型列表分两组 —— 扩散模型（diffusion_models，三件套加载器）和整合包（checkpoints，' +
-                '像 Illustrious / 光辉 这类 SDXL 检查点，一个文件就带 MODEL/CLIP/VAE）。' +
-                '对话栏选的模型优先；只有它停在「自动」时，comfy_run 的 unet 参数才生效。LoRA 没开就别传 lora。' +
-                '别的模式没有这两个控件，要指定模型就显式传 unet，LoRA 用不了。',
+                '一个文件就带 MODEL/CLIP/VAE）。' +
+                '对话栏选的模型优先；只有它停在「自动」时，comfy_run 的 unet 参数才生效。' +
+                '⚠️ 你看不到那边选了什么 —— 想知道就用 comfy_models，它开头会报「当前绘图配置」' +
+                '（正在用哪个模型、LoRA 允不允许挂、提示词目录配了没有）。别凭世界知识猜该用哪个模型。' +
+                'LoRA 没开就别传 lora；开了但不知道挂哪个，传 lora:"auto" 让插件按 prompt 里的角色名挑' +
+                '（中文 / 日文 / 罗马音都认，认不出或认出多个它都会说明，不瞎挂）。' +
+                '别的模式没有这两个控件，要指定模型就显式传 unet。',
               'img2img：comfy_run mode="img2img" + image_prompt_id（底图）+ denoise 做重绘（先在图生图开关里打开）。',
               'comfy_review：让审图模型看一张图判断是否满足要求、不满意自动重画（设置页开启 review 并指定模型）。',
               '要判断「角色是否还原」时，把参考图的 prompt_id 一起传给 comfy_review 的 reference_prompt_id —— 它会把两张图一起交给审图模型比对。',
@@ -2499,10 +3714,16 @@ export function apply(ctx, config) {
               '图片落在哪：默认就是 ComfyUI 自己的 output 目录（comfy_result 会报出完整路径）；设置页的「输出目录」配了就额外复制一份过去，save_to 可以单次覆盖。那一栏只有「选择」按钮（点开是系统文件夹选择框）和一个「清除」，没有手填框。',
               'LoRA 提示词：设置页的「LoRA 提示词」可以指定一个目录。目录里可以混放各种文档（角色说明、画风笔记、tag 清单都行），'
                 + '文件名也不必与 LoRA 名对齐 —— comfy_run / comfy_review 挂 LoRA 时会读进来按内容打分（文件名像不像、正文提没提到、'
-                + '内容像不像提示词），挑最像的那篇把提示词段并进 prompt，并在结果里说明挑中了哪篇、为什么。'
-                + '没指定目录时什么都不读。想先看一眼用 comfy_lora_doc（给 lora 看打分表与那篇的内容，不给就列候选；full:true 看全文）。'
-                + '文档超过字数上限时按空行/换行/逗号边界截断（设置页可调 200–20000，默认 4000），'
-                + '结果里会写明原文多少字、并了多少字、切在什么边界；要看被截掉的后半段传 rest:true，要看整篇传 full:true。'
+                + '内容像不像提示词），挑最像的那篇，再把里面真正的 tag 行并进 prompt，并在结果里说明挑中了哪篇、为什么。'
+                + '文档里的说明文字（模型信息、作者原话、踩坑清单、参数建议）不会被并进去 —— 只有逐行判定成 tag 的段才进 prompt；'
+                + '「负面：」/「—— 可用负面词 ——」下面那段会并进 negative prompt。'
+                + '多套服装的文档（一套衣服一节，或一章挂多套）按「套」挑：你说「穿女仆装」就只并女仆那一套 + 角色本体锚点，'
+                + '绝不把校服、服务员、旗袍同时塞进去互相打架；没点名服装就并锚点 + 第一套；文档里没有你说的那套（走同义词也找不到）'
+                + '就只并角色本体，并在结果里明说「服装段自己写」。所以换衣服场景不用再传 lora_doc:"off" 关文档。'
+                + '没传 lora 时一个文件都不读，结果里会明说「这次没传 lora，没读文档」。'
+                + '想先看一眼用 comfy_lora_doc（给 lora 看打分表与那篇的 tag 段与负面段，不给就列候选；full:true 看全文）。'
+                + '字数预算默认 4000、设置页可调 200–20000，管的是「并进去的 tag 一共多少字」；结果里会写明并的是哪一套服装、'
+                + '锚点多少字、共多少字、负面多少字；要看没挑中的那几套传 rest:true，要看整篇传 full:true。'
                 + '传 lora_doc:"off" 可以只对这一次跳过。',
               '1024×1024 在消费级显卡上单张通常要几十秒到两分钟，所以 comfy_result 要带 wait_seconds（单张 120，多张按张数加）。',
               '显存吃紧时 batch 保持 1；要腾地方用 comfy_control free_vram。',

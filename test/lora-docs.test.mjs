@@ -19,17 +19,29 @@ import { join } from 'node:path'
 import test from 'node:test'
 import {
   chooseLoraDoc,
+  composeDocSection,
   composeLoraPrompt,
+  composeNegative,
+  describeDrawConfig,
+  docAliases,
   docTitle,
   extractPromptSection,
+  findNegativeNode,
+  loraAliases,
   looksLikePrompt,
+  matchLoraForPrompt,
   nameTokens,
+  normalizeAlias,
   normalizeLoraKey,
+  parsePromptBlocks,
+  pickPromptBlocks,
   promptBody,
+  promptWords,
   rankLoraDocs,
   readLoraDocs,
   resolveConfiguredDir,
   scoreDocForLora,
+  tagishLine,
 } from '../index.js'
 
 /** 造一个临时目录，跑完自动删；回调里拿到的 root 就是「提示词目录」 */
@@ -464,5 +476,335 @@ test('composeLoraPrompt：空文档原样返回，有内容才拼接', () => {
   assert.equal(composeLoraPrompt('', 'silver hair'), 'silver hair')
   assert.equal(composeLoraPrompt(undefined, 'silver hair'), 'silver hair')
   // 前后空白要收掉，避免 prompt 里出现三连换行
-  assert.equal(composeLoraPrompt('  a cat  ', '  silver hair  '), 'a cat\n\nsilver hair')
+  assert.equal(composeLoraPrompt('  a cat  ',  '  silver hair  '), 'a cat\n\nsilver hair')
+})
+
+test('tagishLine：逗号分隔的 tag 串是 tag，中文说明 / 表格 / 全角括号都不是', () => {
+  assert.equal(tagishLine('tenshi_amane_school, hairband, black hairband, braid, yellow necktie'), true)
+  // 末尾挂着分隔符也算同一行（作者手滑多打了个逗号）
+  assert.equal(tagishLine('masterpiece, best quality, 1girl, solo, '), true)
+  // 太短 / 段数不够
+  assert.equal(tagishLine('a, b'), false)
+  assert.equal(tagishLine('masterpiece, best quality, 1girl'), true)
+  // 中文叙述、句号收尾、表格、全角括号里的说明
+  assert.equal(tagishLine('这套是 Belle Anima v1 训的。'), false)
+  assert.equal(tagishLine('| 项目 | 说明 |'), false)
+  assert.equal(tagishLine('off shoulder（要披肩时用）, lowres, bad anatomy, bad hands'), false)
+  // 「一段中文标签 + 一串英文 tag」混排：绝大多数段不是纯英文，判掉（交给上层剥标签）
+  assert.equal(tagishLine('军装 peaked cap, military hat, black headwear, white gloves'), false)
+  // 空值不抛
+  assert.equal(tagishLine(''), false)
+  assert.equal(tagishLine(undefined), false)
+})
+
+test('parsePromptBlocks：正负分流、跨块延续、章节标题把态重置回正面', () => {
+  const doc = [
+    '这套是 Belle Anima v1 训的。',
+    '',
+    '▍① SCHOOL UNIFORM',
+    'tenshi_amane_school, hairband, braid, yellow necktie',
+    '',
+    '负面：',
+    'worst quality, low quality, bad anatomy',
+    '',
+    '▍② ROOM WEAR',
+    'tenshi_amane_roomwear, cardigan, floral print, sleeveless',
+    '',
+    '作者备注：无。',
+  ].join('\n')
+  const parsed = parsePromptBlocks(doc)
+  assert.deepEqual(parsed.positive.map((b) => b.text), [
+    'tenshi_amane_school, hairband, braid, yellow necktie',
+    // `▍②` 是章节标题：不然后面这段会跟着上一处「负面」一起算负面
+    'tenshi_amane_roomwear, cardigan, floral print, sleeveless',
+  ])
+  assert.deepEqual(parsed.negative.map((b) => b.text), ['worst quality, low quality, bad anatomy'])
+  assert.equal(parsed.blocks, 5)
+  // 开头那句散文 + 结尾「作者备注：无。」两块都是纯说明
+  assert.equal(parsed.dropped, 2)
+  assert.equal(parsed.totalChars, doc.length)
+  // 负面单独成行、tag 写在下一块，仍然算负面（`负面：` 后空一行是常见写法）
+  const split = parsePromptBlocks(['负面：', '', 'low quality, blurry, bad anatomy'].join('\n'))
+  assert.equal(split.positive.length, 0)
+  assert.deepEqual(split.negative.map((b) => b.text), ['low quality, blurry, bad anatomy'])
+})
+
+test('parsePromptBlocks：行内 tag、中文标签、方括号占位符都要洗干净', () => {
+  const doc = [
+    '## 正面提示词',
+    '',
+    '军装 peaked cap, military hat, black headwear, white gloves, military uniform',
+    '',
+    'masterpiece, best quality, 1girl, solo, shiki natsume, [在这里写你要的服装标签], looking at viewer',
+    '',
+    '校服 school uniform, black pantyhose, white skirt',
+    '',
+    '负面：low quality, blurry, worst quality',
+  ].join('\n')
+  const parsed = parsePromptBlocks(doc)
+  assert.deepEqual(parsed.positive.map((b) => b.text), [
+    // 段首中文标签是给人看的，剥掉
+    'peaked cap, military hat, black headwear, white gloves, military uniform',
+    // 方括号占位符是模板槽位，不该进 prompt
+    'masterpiece, best quality, 1girl, solo, shiki natsume, looking at viewer',
+    'school uniform, black pantyhose, white skirt',
+  ])
+  // 冒号后面直接跟 tag 的写法
+  assert.deepEqual(parsed.negative.map((b) => b.text), ['low quality, blurry, worst quality'])
+})
+
+test('parsePromptBlocks：`对策：负面里写死 xxx` 是正文，不是负面小标题', () => {
+  const doc = [
+    'tenshi_amane_school, hairband, braid, yellow necktie',
+    '',
+    '对策：负面里写死 school uniform, yellow necktie, suspender skirt。',
+    '',
+    'tenshi_amane_roomwear, cardigan, floral print, sleeveless',
+  ].join('\n')
+  const parsed = parsePromptBlocks(doc)
+  assert.equal(parsed.negative.length, 0)
+  assert.equal(parsed.positive.length, 2)
+})
+
+test('promptWords：只留内容词，停用词与权重数字不算', () => {
+  assert.deepEqual(promptWords('masterpiece, best quality, 1girl, solo, SILVER hair, (red eyes:1.2), 0.8'), [
+    '1girl', 'silver', 'hair', 'red', 'eyes',
+  ])
+  assert.deepEqual(promptWords(''), [])
+  assert.deepEqual(promptWords(undefined), [])
+})
+
+test('pickPromptBlocks：贴题的段优先，装不下的进 unpicked，最后仍按原文顺序拼', () => {
+  const blocks = [
+    { text: 'school uniform, yellow necktie, suspender skirt, pleated skirt' },
+    { text: 'green eyes, pink hair, very long hair, single braid, hairband' },
+    { text: 'battle uniform, black jacket, red armband, boots, gloves' },
+  ]
+  // 预算紧：先装最贴题的那段，再装按原文顺序排在它前面的
+  const hair = pickPromptBlocks(blocks, { maxChars: 130, prompt: 'pink hair, hairband' })
+  assert.match(hair.text, /hairband/)
+  assert.match(hair.text, /school uniform/)
+  assert.doesNotMatch(hair.text, /battle uniform/)
+  assert.equal(hair.picked, 2)
+  assert.equal(hair.total, 3)
+  assert.equal(hair.unpicked.length, 1)
+  const battle = pickPromptBlocks(blocks, { maxChars: 130, prompt: 'battle uniform, boots' })
+  assert.match(battle.text, /battle uniform/)
+  assert.doesNotMatch(battle.text, /hairband/)
+  // 拼回去的顺序必须是文档顺序（school 在前面）
+  assert.ok(battle.text.indexOf('school uniform') < battle.text.indexOf('battle uniform'))
+  // 没给 prompt 时退化成按原文顺序取
+  const plain = pickPromptBlocks(blocks, { maxChars: 130 })
+  assert.equal(plain.picked, 2)
+  assert.ok(plain.text.startsWith('school uniform'))
+})
+
+test('pickPromptBlocks：唯一一段就超预算时按边界收口，不整篇白读', () => {
+  const blocks = [{ text: Array.from({ length: 100 }, (_, i) => `tag_${i}`).join(', ') }]
+  const picked = pickPromptBlocks(blocks, { maxChars: 120 })
+  assert.equal(picked.picked, 1)
+  assert.equal(picked.partial, true)
+  assert.ok(picked.text.length <= 120, `超预算了：${picked.text.length}`)
+  // 收口落在完整 tag 上
+  assert.match(picked.text.slice(-16), /, tag_\d+$/)
+  assert.equal(picked.unpicked.length, 1)
+})
+
+test('pickPromptBlocks：短段不会因为「都提到 red eyes」把整段长 tag 判成重复', () => {
+  const blocks = [
+    { text: 'red eyes' },
+    { text: 'red eyes, long hair, twin tails, school uniform, ribbon, pleated skirt, thighhighs' },
+  ]
+  const picked = pickPromptBlocks(blocks, { maxChars: 500 })
+  assert.equal(picked.picked, 2)
+  assert.equal(picked.unpicked.length, 0)
+})
+
+test('composeDocSection：多套服装走 tags 模式，单段 tag / 纯散文退回整段按边界收口', () => {
+  // 多套服装：按「套」挑，一次只并一套（另一套不出现在结果里）
+  const multi = composeDocSection([
+    '这套 LoRA 用 Belle Anima v1 训的。',
+    '',
+    '## 提示词',
+    'belle_anima_v1, school',
+    'school_uniform, yellow necktie, pleated skirt',
+    '',
+    'belle_anima_v1, battle',
+    'battle_uniform, combat boots, silver hair',
+  ].join('\n'), { maxChars: 4000, prompt: '1girl, battle uniform' })
+  assert.equal(multi.mode, 'tags')
+  assert.match(multi.text, /battle_uniform/)
+  assert.doesNotMatch(multi.text, /school_uniform/)
+  assert.equal(multi.picked, 1)
+  assert.equal(multi.outfit, 'battle')
+  assert.equal(multi.how, 'name')
+
+  // 单段 tag + 负面：没有可互斥的「套」，退回整段收口，负面照旧
+  const single = composeDocSection([
+    '这套 LoRA 用 Belle Anima v1 训的。',
+    '',
+    '## 提示词',
+    '1girl, green eyes, pink hair, short hair',
+    '',
+    '负面：',
+    'worst quality, low quality, bad anatomy',
+  ].join('\n'), { maxChars: 4000 })
+  assert.equal(single.mode, 'plain')
+  assert.equal(single.text, '1girl, green eyes, pink hair, short hair')
+  assert.equal(single.negative, 'worst quality, low quality, bad anatomy')
+  assert.equal(single.truncated, false)
+  assert.ok(single.negativeChars > 0)
+
+  // 一个 tag 行都没有：退回整篇按边界收口（旧行为不能丢）
+  const plain = composeDocSection('这是一篇没有 tag 的说明文字。'.repeat(50), { maxChars: 100 })
+  assert.equal(plain.mode, 'plain')
+  assert.equal(plain.negative, '')
+  assert.equal(plain.truncated, true)
+  assert.ok(plain.keptChars <= 100)
+})
+
+test('composeNegative：两段负面词合并去重，空的直接让位', () => {
+  assert.equal(composeNegative('lowres, blurry', 'blurry, bad hands, BAD HANDS'), 'lowres, blurry, bad hands')
+  // 用户自己填的负面词保持在前面
+  assert.ok(composeNegative('my negative', 'doc negative').startsWith('my negative'))
+  assert.equal(composeNegative('lowres', ''), 'lowres')
+  assert.equal(composeNegative('', 'bad hands'), 'bad hands')
+  assert.equal(composeNegative(undefined, undefined), '')
+  // 文档负面词不该换行追加：重复的词会互相抵消
+  assert.doesNotMatch(composeNegative('lowres', 'bad hands'), /\n/)
+})
+
+test('findNegativeNode：顺着 KSampler.negative 找 CLIPTextEncode，不靠节点序号猜', () => {
+  const graph = {
+    1: { class_type: 'CLIPTextEncode', inputs: { text: 'a girl' } },
+    2: { class_type: 'CLIPTextEncode', inputs: { text: 'lowres' } },
+    3: { class_type: 'KSampler', inputs: { positive: ['1', 0], negative: ['2', 0] } },
+  }
+  assert.equal(findNegativeNode(graph, '1'), '2')
+  // 不跳过时也能找到（线上调用会传 positiveId，这里只验「跳过」生效）
+  assert.equal(findNegativeNode(graph), '2')
+  assert.equal(findNegativeNode(graph, '2'), null)
+  // 没有 CLIPTextEncode / 空图 / 坏的 link
+  assert.equal(findNegativeNode({}), null)
+  assert.equal(findNegativeNode(undefined), null)
+  assert.equal(findNegativeNode({ 3: { class_type: 'KSampler', inputs: { negative: ['9', 0] } } }), null)
+})
+
+// ── 角色别名：中文 / 日文 / 罗马音都对得上 LoRA 文件名 ──────────────────────
+// 用户说的往往是中文（四季夏目），LoRA 文件名却是罗马音或编号（natsume-000016）。
+// 对照表只能从已有证据里取 —— 文档标题行的「中文（日文 / 罗马音）」就是现成的。
+
+test('docAliases：从标题行同时取出中文、日文、罗马音', () => {
+  const { line, aliases } = docAliases([
+    '========================================================================',
+    '四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单',
+    '版本：natsume-ani1.0',
+  ].join('\n'))
+  assert.match(line, /四季夏目/)
+  for (const want of ['四季夏目', '四季 ナツメ', 'ナツメ', 'Shiki Natsume', 'Natsume']) {
+    assert.ok(aliases.includes(want), `别名里缺「${want}」：${JSON.stringify(aliases)}`)
+  }
+  // 体裁词与版本号不该混进来
+  for (const bad of ['Anima', 'LoRA', '提示词清单', 'natsume-ani1.0']) {
+    assert.ok(!aliases.includes(bad), `别名里混进了「${bad}」`)
+  }
+  // 繁简两种写法在同一行里并排出现时都要收（不做繁简转换）
+  const twins = docAliases('谷风天音（谷風天音 / Tanikaze Amane）Illustrious LoRA 提示词清单')
+  assert.ok(twins.aliases.includes('谷风天音'))
+  assert.ok(twins.aliases.includes('谷風天音'))
+})
+
+test('docAliases：一行说明 + 小节名的文档不会把小节名当角色名', () => {
+  // `绝区零 铃.txt` 的真实结构：第 1 行英文说明，下面是 Base outfit / Summer Skies 这些服装小节
+  const text = [
+    'Use the identity token plus one outfit token, then the kit line for that outfit.',
+    '',
+    'Base outfit',
+    'bellezzz, baseout, black shirt',
+    '',
+    'Summer Skies',
+    'bellezzz, summerout, white shirt',
+  ].join('\n')
+  assert.deepEqual(docAliases(text).aliases, [])
+})
+
+test('normalizeAlias：空格 / 下划线 / 中点 / 全角都不影响比对', () => {
+  assert.equal(normalizeAlias('Shiki Natsume'), normalizeAlias('shiki_natsume'))
+  assert.equal(normalizeAlias('四季 ナツメ'), normalizeAlias('四季・ナツメ'))
+  assert.equal(normalizeAlias('因幡　めぐる'), normalizeAlias('因幡めぐる'))
+})
+
+test('loraAliases + matchLoraForPrompt：中文 / 日文 / 罗马音都能挑中同一个 LoRA', () => {
+  const docs = [
+    {
+      stem: '四季夏目_Anima_LoRA_提示词清单',
+      raw: '========================================================================\n四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单\n',
+      siblings: ['natsume_000016'],
+    },
+    {
+      stem: '谷风天音__提示词清单',
+      raw: '谷风天音（谷風天音 / Tanikaze Amane）Illustrious LoRA 提示词清单\n',
+      siblings: ['tenshi_amane'],
+    },
+  ]
+  const loras = ['natsume-000016.safetensors', 'tenshi_amane.safetensors', 'belle_anima_v1.safetensors']
+  const natsume = loraAliases('natsume-000016.safetensors', docs)
+  // 文件名只给「natsume」，中文/日文靠同目录文档补上
+  assert.ok(natsume.aliases.includes('四季夏目'))
+  assert.ok(natsume.aliases.includes('四季 ナツメ'))
+  assert.ok(natsume.sources.docs.length > 0)
+
+  for (const prompt of ['画个四季夏目', '四季 ナツメ を描いて', 'shiki natsume', 'NATSUME']) {
+    const matched = matchLoraForPrompt(prompt, loras, docs)
+    assert.equal(matched.pick, 'natsume-000016.safetensors', `「${prompt}」没挑中：${matched.reason}`)
+    assert.equal(matched.candidates.length, 1)
+  }
+  // 同理，罗马音先行的文件名也能被中文 prompt 命中
+  assert.equal(matchLoraForPrompt('画个谷风天音', loras, docs).pick, 'tenshi_amane.safetensors')
+  assert.equal(matchLoraForPrompt('tanikaze amane', loras, docs).pick, 'tenshi_amane.safetensors')
+})
+
+test('matchLoraForPrompt：认不出就不挂，认出多个就列候选', () => {
+  const docs = [
+    { stem: '四季夏目', raw: '四季夏目（四季 ナツメ / Shiki Natsume）\n', siblings: ['natsume'] },
+    { stem: '因幡巡', raw: '因幡巡（因幡 めぐる / Inaba Meguru）\n', siblings: ['meguru'] },
+  ]
+  const loras = ['natsume.safetensors', 'meguru.safetensors']
+  // 泛称 / 服装词 / 空 prompt 都不能当成角色
+  for (const prompt of ['画个美少女', 'summer outfit', '', 'a girl, solo, best quality']) {
+    const matched = matchLoraForPrompt(prompt, loras, docs)
+    assert.equal(matched.pick, '')
+    assert.equal(matched.candidates.length, 0, `「${prompt}」误命中：${JSON.stringify(matched.candidates)}`)
+    assert.match(matched.reason, /没在 prompt 里认出/)
+  }
+  // 同时点了两个角色 → 不替你猜
+  const both = matchLoraForPrompt('画个四季夏目和因幡巡', loras, docs)
+  assert.equal(both.pick, '')
+  assert.equal(both.candidates.length, 2)
+  assert.match(both.reason, /不替你猜/)
+  // loras 为空时不抛错
+  assert.equal(matchLoraForPrompt('四季夏目', [], docs).pick, '')
+})
+
+test('describeDrawConfig：把「模型 / LoRA 开关 / 文档目录」讲成模型能直接读的几句话', () => {
+  const fixed = describeDrawConfig(
+    { draw: { unet: 'anima-base-v1.0.safetensors', lora: true }, loraDocs: { dir: 'D:\\docs', maxChars: 4000 } },
+    { diffusion_models: ['anima-base-v1.0.safetensors'], checkpoints: ['Illustrious-XL-v2.0.safetensors'], loras: ['a'] },
+  ).join('\n')
+  assert.match(fixed, /生图模型：anima-base-v1\.0\.safetensors/)
+  // 用户已经选定了模型，就必须说清「传 unet 也不会覆盖」—— 否则模型会以为能自己换
+  assert.match(fixed, /不会覆盖/)
+  assert.match(fixed, /LoRA：允许挂/)
+  assert.match(fixed, /字数预算 4000/)
+
+  const auto = describeDrawConfig(
+    { draw: { unet: '', lora: false }, loraDocs: { dir: '', maxChars: 4000 } },
+    { diffusion_models: ['anima-base-v1.0.safetensors'], checkpoints: [], loras: [] },
+  ).join('\n')
+  assert.match(auto, /生图模型：自动/)
+  assert.match(auto, /LoRA：已关/)
+  assert.match(auto, /没配目录/)
+
+  // 一个模型都没有时要说清「先装模型」，别让模型去猜
+  assert.match(describeDrawConfig({ draw: { unet: '', lora: true }, loraDocs: { dir: '', maxChars: 4000 } }, {}).join('\n'), /先装模型/)
 })
