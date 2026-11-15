@@ -81,21 +81,12 @@ Those three lines matter: without them the model can only guess from world knowl
 
 `lora` on `comfy_run` / `comfy_review` accepts `"auto"` in addition to a literal file name — it picks a LoRA by the **character name** that appears in `prompt` (`comfy_review` matches against `requirement`).
 
-Matching is alias-based: the file name (`natsume-000016` → `natsume`), the title of the doc sitting in the same folder, and the alternative spellings inside that title's parentheses. So all of these resolve (the heading `四季夏目（四季 ナツメ / Shiki Natsume）` carries Chinese, Japanese and romaji at once):
-
-| You say | Resolves to |
-| --- | --- |
-| `画个四季夏目` / `四季 ナツメ を描いて` / `shiki natsume` | `natsume-000016.safetensors` |
-| `画个因幡巡` / `inaba meguru` | `meguru_anima_base_v1.0.safetensors` |
-| `绫地宁宁` / `Ayachi Nene` | `ayachi-nene-0.2-32.safetensors` |
-| `谷风天音` / `tanikaze amane` | `tenshi_amane.safetensors` |
-| `画个铃` | `belle_anima_v1.safetensors` |
-| `画个美少女` / `summer outfit` | No match — nothing attached, drawing proceeds |
+Matching is alias-based: the file name, the doc title, and the alternative spellings inside that title's parentheses — Chinese, Japanese and romaji all count.
 
 Three rules:
 
 - **Only a unique hit is attached.** Zero matches → the image is still generated, and the result says it could not match any character name, pointing at `comfy_models` for the alias table.
-- **Several matches means none is attached.** `画个四季夏目和因幡巡` lists the candidates (and which alias each one hit) and lets you choose — guessing wrong is worse than not attaching.
+- **Several matches means none is attached.** Naming two characters at once lists the candidates (and which alias each one hit) and lets you choose — guessing wrong is worse than not attaching.
 - **Spellings the docs never mention do not match.** A kana form like `カナヲ`, or a romaji abbreviation, will not resolve. Pass the LoRA file name to `lora` directly in that case.
 
 One more thing: **prompt documents are only read when `lora` is passed**. Without it the plugin reads no file at all — and the result says so ("this call passed no lora, so no document was read") rather than letting you assume it did.
@@ -259,8 +250,6 @@ Prose in those documents (model info, the author's commentary, pitfalls, paramet
 | Title equals / contains the LoRA name | +35 / +25 |
 | Has a `Prompt` / `提示词` heading | +20 |
 | Content itself is a comma-separated tag list | +12 |
-
-**Sharing a folder is the strongest signal**: many people make one folder per character and put the LoRA file and the prompt document side by side (`铃/belle_anima_v1.safetensors` + `铃/绝区零 铃.txt`) — then the names don't matter at all. But if one folder holds several LoRAs (a whole series sharing one note), sharing a folder only counts as half the evidence and the body or title still has to name the LoRA.
 
 Three outcomes:
 
