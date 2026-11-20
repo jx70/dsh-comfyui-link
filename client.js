@@ -88,7 +88,7 @@ window.__ModuleLoader__.load({
         drawAuto: '自动（默认模型）',
         drawHint: '出图时用这个模型（整合包和三件套都能选）',
         drawGroupUnet: '扩散模型（三件套）',
-        drawGroupCheckpoint: '整合包（光辉 / SDXL 检查点）',
+        drawGroupCheckpoint: '整合包（checkpoints，一个文件带 MODEL/CLIP/VAE）',
         allowLora: '允许挂 LoRA（点一下关掉）',
         loraBlocked: 'LoRA 已关：不允许挂角色 LoRA（点一下打开）',
         drawLoadFailed: '读不到 ComfyUI 模型清单',
@@ -151,7 +151,7 @@ window.__ModuleLoader__.load({
         drawAuto: 'Auto (default model)',
         drawHint: 'The model used for generation (checkpoints and standalone diffusion models both work)',
         drawGroupUnet: 'Diffusion models',
-        drawGroupCheckpoint: 'Checkpoints (Illustrious / SDXL)',
+        drawGroupCheckpoint: 'Checkpoints (single-file MODEL/CLIP/VAE)',
         allowLora: 'LoRA allowed (click to turn off)',
         loraBlocked: 'LoRA off: character LoRAs are blocked (click to allow)',
         drawLoadFailed: 'Cannot read the ComfyUI model list',
@@ -909,7 +909,7 @@ window.__ModuleLoader__.load({
           ? t('loading')
           : `${t('drawHint')}${total > 0 ? `（${total}）` : ''}`
       const stale = unet !== '' && !models.names.includes(unet)
-      // 整合包（Illustrious / 光辉 这类）和三件套分两组列，选中的名字自己说明用哪种加载器
+      // 整合包（checkpoints）和三件套分两组列，选中的名字自己说明用哪种加载器
       const groups = []
       if (models.unets.length > 0) {
         groups.push(h('optgroup', { key: 'unet', label: t('drawGroupUnet') },

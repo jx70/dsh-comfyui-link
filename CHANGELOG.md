@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-11-20
+
+### 修复
+
+- **首发 npm**：README / README.en / cordis.patch.yml 的安装命令改为 `dsh plugin --profile web add dsh-comfyui-link`，保留 GitHub / link 两种；测试里的「禁止写 npm 安装命令」守护改为「必须有 npm 安装命令且不再说未发布」。
+- **轮询卡住不再空转到 deadline：`client.job` 返回 null 时改用三级兜底**：排队任务被取消（dequeue）或历史被挤出后，`/api/jobs/{id}` 变 404，旧逻辑用 `?? job` 保留旧状态一直空等。现在 `/api/jobs` 查不到就先看 `history`（有记录视为完成），再看 `/queue` 是否还在跑/排队，三处都没有才判「状态丢失」并给可读文案。
+- **`submitAndFetch` 超时不再抛误导性的「历史里没有输出」**：到 deadline 还在跑时改为抛明确超时错误，带已等时长、最后状态、队列快照，并指路 `comfy_status` 查 prompt_id 和加大 `comfy_result` 的 `wait_seconds`；状态丢失也单独报错，只有真正 finished 才去取图。
+- **`comfy_result` 超时文案补全信息**：从「再调一次、wait_seconds 给大一点」升级为带已等时长、最后状态、队列正在跑/排队条数、`comfy_status` 查 prompt_id 的可读提示；状态丢失走单独文案。
+- **状态字段归一，堵住「状态异常但任务已完」的死等**：把 `error`/`execution_error`→failed、`interrupted`/`execution_interrupted`→cancelled、`running`→in_progress 等各版本写法归一；遇到没见过的非空状态，只要 history 有记录就当完成，不再抱着看不懂的状态空等。
+- `submitAndFetch` 与 `comfy_result` 的轮询收敛到共享的 `waitForJob`（`createJobWaiter`），两处判断一致；`AbortSignal` 触发时 `sleep` 与 `client.job` 都带 signal，取消立即生效、不留悬挂 await。
+
+### 测试
+
+- 新增 `test/polling-k37.test.mjs`（7 条）：正常状态推进、job 变 null 但 history 有记录、三处找不到判丢失、`wait_seconds` 到期超时文案、`AbortSignal` 快速取消、`normalizeStatus` 归一、源码快照断言超时分支先于取图。全套 164 → **171** 条全绿。
+
 ## [1.9.0] - 2026-11-15
 
 ### 修复

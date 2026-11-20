@@ -116,9 +116,13 @@
 
 ## 安装
 
-> **暂未上传 npm。** 现在只能从 GitHub 装 —— 下面每条命令都带 `github:` 前缀。别用 `add` 后面只跟包名那种写法：registry 上没有这个包，装不到东西。
+从 npm 装（推荐）：
 
-从 GitHub 装：
+```bash
+dsh plugin --profile web add dsh-comfyui-link
+```
+
+想跟最新代码，从 GitHub 装：
 
 ```bash
 dsh plugin --profile web add github:jx70/dsh-comfyui-link

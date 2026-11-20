@@ -806,19 +806,16 @@ test('参数校验排在联网之前：ComfyUI 没跑也不影响报错内容', 
   }
 })
 
-test('ComfyUI 没跑时，参数全对的调用才会走到网络那一步', async () => {
-  const { tools } = boot({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
-  await assert.rejects(
-    () => tools.get('comfy_run').execute({ mode: 'template', prompt: '一只猫' }, createExec()),
-    (error) => {
-      const message = String(error?.message ?? error)
-      // 具体文案随平台变（ECONNREFUSED / fetch failed），关键是它已经是网络错，
-      // 而不是参数校验或开关拦截。
-      assert.match(message, /ComfyUI/)
-      assert.doesNotMatch(message, /没开启|必须给 prompt|image_prompt_id/)
-      return true
-    },
-  )
+test('ComfyUI 没跑且参数全对时，返回统一的「没在跑」说明而不是裸错误', async () => {
+  const baseUrl = 'http://127.0.0.1:1'
+  const { tools } = boot({ baseUrl, timeoutMs: 2000 })
+  // 新行为：OFFLINE 不再 throw，而是返回可读文案（见 registerComfyTool / offlineResult）。
+  const result = await tools.get('comfy_run').execute({ mode: 'template', prompt: '一只猫' }, createExec())
+  assert.equal(typeof result.text, 'string')
+  assert.match(result.text, /ComfyUI 没在跑/)
+  assert.match(result.text, /127\.0\.0\.1:1/)
+  assert.match(result.text, /先把 ComfyUI 启动起来再试/)
+  assert.doesNotMatch(result.text, /没开启|必须给 prompt|image_prompt_id/)
 })
 
 test('comfy_upscale 的 method 只给五个算法，默认 lanczos 走 lib', () => {

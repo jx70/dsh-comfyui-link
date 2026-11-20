@@ -335,6 +335,112 @@ export async function saveImageCopy(dir, image, bytes) {
 }
 
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
+/**
+ * 非终态但合法的中间态。状态是这些之外的非空值（比如某个新构建多出来的
+ * `interrupted`/`execution_error`）时，若 history 已经有记录就当完成处理，
+ * 避免插件抱着一个看不懂的状态空等到 deadline。
+ */
+const KNOWN_NONFINAL = new Set(['pending', 'in_progress', 'queued', 'running'])
+
+/** 把 ComfyUI 各版本的状态字段归一到我们的终态/中间态口径。纯函数，可单测。 */
+export function normalizeStatus(status) {
+  const s = String(status ?? '').toLowerCase()
+  if (s === 'interrupted' || s === 'execution_interrupted' || s === 'cancelled' || s === 'canceled') return 'cancelled'
+  if (s === 'error' || s === 'execution_error' || s === 'failed' || s === 'failure') return 'failed'
+  if (s === 'success' || s === 'completed') return 'completed'
+  if (s === 'running' || s === 'in_progress') return 'in_progress'
+  if (s === 'queued' || s === 'pending') return 'pending'
+  return s
+}
+
+/** 队列里某个 id 是否还在（running / pending 都算）。查不到就当不在。 */
+async function jobInQueue(client, promptId, signal) {
+  const q = await client.queue({ signal }).catch(() => null)
+  if (!q) return false
+  const items = [...(q.queue_running ?? []), ...(q.queue_pending ?? [])]
+  return items.some((item) => {
+    const id = Array.isArray(item) ? item[1] : item?.prompt_id ?? item?.id
+    return id === promptId
+  })
+}
+
+/** 给超时文案附一句队列快照；快照失败不影响主流程。 */
+export async function queueSnapshot(client, signal) {
+  const q = await client.queue({ signal }).catch(() => null)
+  if (!q) return ''
+  const running = q.queue_running?.length ?? 0
+  const pending = q.queue_pending?.length ?? 0
+  return `（队列：正在跑 ${running} 个，排队 ${pending} 个）`
+}
+
+/**
+ * 造一个「等任务结束」的函数。submitAndFetch 与 comfy_result 共用同一套判断，
+ * 避免两处各写一份、改一处漏一处。
+ *
+ * 返回 { job, reason, lastStatus, queueInfo }：
+ *   reason = finished | timeout | lost
+ *   - finished：job.status 已归一，调用方看 failed / completed 即可
+ *   - timeout ：到 deadline 还在跑；queueInfo 带队列快照
+ *   - lost    ：/api/jobs、history、/queue 三处都找不到（多半被取消或历史被挤出）
+ *
+ * 关键修复：client.job 返回 null 时不再用旧状态冒充继续空转，而是三级兜底；
+ * 状态字段是没见过的非空值时，只要 history 有记录也当成跑完，堵住「状态丢了」
+ * 导致的死等。所有兜底请求都带 signal 并 catch 降级，abort 会直接向上抛 CANCELLED。
+ */
+export function createJobWaiter(client, settings = {}) {
+  const pollMs = Math.max(250, settings.pollMs ?? 2500)
+  return async function waitForJob(promptId, { signal, deadline, historyFallback = true } = {}) {
+    const end = deadline ?? Date.now() + (settings.maxWaitSeconds ?? 900) * 1000
+    let missing = 0
+    let lastStatus = 'unknown'
+
+    const probe = async () => {
+      const job = await client.job(promptId, { signal })
+      const status = normalizeStatus(job?.status)
+      if (status) lastStatus = status
+
+      if (!job) {
+        // 状态从 /api/jobs 消失了：先去 history 找，有记录就是跑完了
+        if (historyFallback) {
+          const entry = await client.historyEntry(promptId, { signal }).catch(() => null)
+          if (entry) {
+            return { done: true, result: { job: { id: promptId, status: 'completed', outputs_count: 0 }, reason: 'finished', lastStatus: 'completed' } }
+          }
+        }
+        // 再看队列：还在跑/排队就继续等；连着两次三处都找不到才判丢失（躲开刚提交的竞态）
+        const inQueue = await jobInQueue(client, promptId, signal)
+        missing = inQueue ? 0 : missing + 1
+        if (missing >= 2) {
+          return { done: true, result: { job: null, reason: 'lost', lastStatus } }
+        }
+        return { done: false }
+      }
+
+      missing = 0
+      if (FINISHED.has(status)) {
+        return { done: true, result: { job: { ...job, status }, reason: 'finished', lastStatus: status } }
+      }
+      if (!KNOWN_NONFINAL.has(status) && historyFallback) {
+        // 没见过的状态：history 有记录就当完成，别抱着看不懂的词死等
+        const entry = await client.historyEntry(promptId, { signal }).catch(() => null)
+        if (entry) {
+          return { done: true, result: { job: { ...job, status: 'completed' }, reason: 'finished', lastStatus: 'completed' } }
+        }
+      }
+      return { done: false }
+    }
+
+    // 先探一次：wait_seconds=0 时也要给当前状态，不能因为循环不进而什么都不返回
+    while (true) {
+      const { done, result } = await probe()
+      if (done) return result
+      if (Date.now() >= end) break
+      await sleep(Math.min(pollMs, end - Date.now()), signal)
+    }
+    const queueInfo = await queueSnapshot(client, signal)
+    return { job: null, reason: 'timeout', lastStatus, queueInfo }
+  }
+}
 
 // ── LoRA 提示词文档 ───────────────────────────────────────────────────────
 // 目录里可能什么都有：角色说明、画风笔记、随手记的 tag 清单、完全无关的东西。
@@ -2008,9 +2114,24 @@ async function collectVisionModels(service, signal) {
 export function apply(ctx, config) {
   const settings = { ...DEFAULTS, ...(config ?? {}) }
   const client = createClient({ baseUrl: settings.baseUrl, timeoutMs: settings.timeoutMs })
+  const waitForJob = createJobWaiter(client, settings)
 
-  // 保存一份最近一次用过的客户端配置，方便 comfy_status 报地址
+  // 保存一份最近一次用过的客户端配置，方便各工具报地址
   const where = () => client.baseUrl
+
+  /**
+   * ComfyUI 没在跑时统一给「未启动」说明（所有会碰 ComfyUI 的工具共用）。
+   * 只返回可读文案，绝不 spawn / exec main.py，也不改配置、不重试、不弹窗。
+   */
+  function offlineResult(error) {
+    return { text: `ComfyUI 没在跑（${where()}）。\n${explain(error)}\n先把 ComfyUI 启动起来再试。` }
+  }
+
+  /** 把 OFFLINE 错误变成统一文案；非 OFFLINE 原样 throw。 */
+  function offlineOrThrow(error) {
+    if (error instanceof ComfyError && error.code === 'OFFLINE') return offlineResult(error)
+    throw error
+  }
 
   // outputRoot 没配就自己从 /system_stats 的 argv 认一次，认出来后缓存住
   let derivedRoot = null
@@ -2463,10 +2584,21 @@ export function apply(ctx, config) {
     }
     const promptId = submitted.promptId
     const deadline = deadlineMs > 0 ? deadlineMs : Date.now() + settings.maxWaitSeconds * 1000
-    let job = await client.job(promptId, { signal })
-    while (job && !FINISHED.has(job.status) && Date.now() < deadline) {
-      await sleep(Math.min(settings.pollMs, Math.max(250, deadline - Date.now())), signal)
-      job = (await client.job(promptId, { signal })) ?? job
+    const waitStarted = Date.now()
+    const { job, reason, lastStatus, queueInfo } = await waitForJob(promptId, { signal, deadline })
+
+    if (reason === 'timeout') {
+      throw new Error(
+        `等待任务 ${promptId} 超时（已等 ${humanDuration(Date.now() - waitStarted)}，最后状态 ${lastStatus}）。`
+        + `${queueInfo ?? ''} 任务可能还在正常排队/渲染：先调 comfy_status 看 prompt_id ${promptId} 的真实状态，`
+        + '确认还在跑就再调一次 comfy_result 并加大 wait_seconds。',
+      )
+    }
+    if (reason === 'lost') {
+      throw new Error(
+        `任务 ${promptId} 的状态从 ComfyUI 消失了（最后状态 ${lastStatus}）：可能被取消、也可能历史已被挤出。`
+        + '用 comfy_status 查 prompt_id 确认。',
+      )
     }
     if (job?.status === 'failed') {
       throw new Error(`重生成任务 ${promptId} 失败了（可能是显存不够，用 comfy_status 看）`)
@@ -2475,8 +2607,26 @@ export function apply(ctx, config) {
     return { promptId, ref, filename: image.filename, image, bytes, mediaType }
   }
 
+  /**
+   * 注册一个「会碰 ComfyUI」的工具：把 execute 包一层，任何 ComfyError(OFFLINE)
+   * 都统一变成「没在跑」的友好文案，其余错误原样抛。这样提交链路（submit / job /
+   * view / systemStats / modelIndex …）无论哪一步发现服务离线，口径都一致，且
+   * 入口里绝无 spawn / exec main.py 的自动拉起逻辑。
+   */
+  function registerComfyTool(definition) {
+    const original = definition.execute
+    definition.execute = async (args, exec) => {
+      try {
+        return await original(args, exec)
+      } catch (error) {
+        return offlineOrThrow(error)
+      }
+    }
+    return ctx.tools.register(definition)
+  }
+
   // ── 1. comfy_status ────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_status',
     description:
       '看本地 ComfyUI 活着没、显存还剩多少、队列里有什么、最近几个任务跑到哪了。'
@@ -2493,9 +2643,7 @@ export function apply(ctx, config) {
       try {
         stats = await client.systemStats({ signal })
       } catch (error) {
-        if (error instanceof ComfyError && error.code === 'OFFLINE') {
-          return { text: `ComfyUI 没在跑（${where()}）。\n${explain(error)}\n先把 ComfyUI 启动起来再试。` }
-        }
+        if (error instanceof ComfyError && error.code === 'OFFLINE') return offlineResult(error)
         throw new Error(explain(error))
       }
 
@@ -2550,7 +2698,7 @@ export function apply(ctx, config) {
   })
 
   // ── 2. comfy_models ────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_models',
     description:
       '看这台 ComfyUI 上有什么：开头是「当前绘图配置」（现在用的生图模型、LoRA 允不允许挂、'
@@ -2566,6 +2714,7 @@ export function apply(ctx, config) {
       try {
         index = await client.modelIndex({ signal: exec.signal })
       } catch (error) {
+        if (error instanceof ComfyError && error.code === 'OFFLINE') throw error
         throw new Error(explain(error))
       }
       const features = readFeatureConfig(config)
@@ -2604,7 +2753,7 @@ export function apply(ctx, config) {
   })
 
   // ── 3. comfy_node ──────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_node',
     description:
       '查一个 ComfyUI 节点类接受哪些输入、默认值和取值范围、有哪些枚举值。'
@@ -2617,6 +2766,7 @@ export function apply(ctx, config) {
       try {
         info = await client.nodeInfo(args.node_class, { signal: exec.signal })
       } catch (error) {
+        if (error instanceof ComfyError && error.code === 'OFFLINE') throw error
         throw new Error(explain(error))
       }
       if (!info) {
@@ -2670,7 +2820,7 @@ export function apply(ctx, config) {
   })
 
   // ── 4. comfy_run ───────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_run',
     description:
       '把一张工作流提交给 ComfyUI 排队，立刻返回 prompt_id。三种用法：\n'
@@ -2933,7 +3083,7 @@ export function apply(ctx, config) {
   })
 
   // ── 5. comfy_result ────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_result',
     description:
       '等一个任务跑完，然后取回它的输出图。'
@@ -2969,22 +3119,40 @@ export function apply(ctx, config) {
         }
         job = { id: args.prompt_id, status: 'completed', outputs_count: 0 }
       }
+      job = { ...job, status: normalizeStatus(job.status) }
 
-      while (!FINISHED.has(job.status) && Date.now() < deadline) {
-        await sleep(Math.min(settings.pollMs, Math.max(250, deadline - Date.now())), signal)
-        job = (await client.job(args.prompt_id, { signal })) ?? job
+      // 状态还没落进终态才需要等；共享 waiter 负责 null/未知态/超时/丢失的兜底
+      let reason = FINISHED.has(job.status) ? 'finished' : 'waiting'
+      let lastStatus = job.status
+      let queueInfo = ''
+      if (reason === 'waiting') {
+        const waited = await waitForJob(args.prompt_id, { signal, deadline })
+        reason = waited.reason
+        job = waited.job
+        lastStatus = waited.lastStatus
+        queueInfo = waited.queueInfo ?? ''
       }
 
-      const took = job.execution_end_time && job.execution_start_time
+      const took = job?.execution_end_time && job?.execution_start_time
         ? ` · 耗时 ${humanDuration(job.execution_end_time - job.execution_start_time)}`
         : ''
-      const lines = [`任务 ${args.prompt_id}`, `状态：${job.status}${took}`]
+      const lines = [`任务 ${args.prompt_id}`, `状态：${job?.status ?? lastStatus}${took}`]
 
-      if (!FINISHED.has(job.status)) {
-        lines.push(`还在跑（已等 ${humanDuration(Date.now() - started)}）。再调一次 comfy_result，把 wait_seconds 给大一点。`)
+      if (reason === 'timeout') {
+        lines.push(
+          `还在跑（已等 ${humanDuration(Date.now() - started)}，最后状态 ${lastStatus}）${queueInfo}。`,
+          `先调 comfy_status 查 prompt_id ${args.prompt_id} 看真实状态；确认还在排队/渲染，就再调一次 comfy_result 并把 wait_seconds 加大。`,
+        )
         return { text: lines.join('\n') }
       }
-      if (job.status === 'failed') {
+      if (reason === 'lost') {
+        lines.push(
+          `任务状态从 ComfyUI 消失了（最后状态 ${lastStatus}）：可能被取消、也可能历史已被挤出。`,
+          `用 comfy_status 查 prompt_id ${args.prompt_id} 确认。`,
+        )
+        return { text: lines.join('\n') }
+      }
+      if (job?.status === 'failed') {
         lines.push('这个任务失败了。ComfyUI 的控制台窗口里有具体报错；也可以 comfy_status 看看是不是显存不够。')
         return { text: lines.join('\n') }
       }
@@ -3073,7 +3241,7 @@ export function apply(ctx, config) {
   })
 
   // ── 6. comfy_control ───────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_control',
     description:
       '管 ComfyUI 的队列：取消某个任务、打断正在跑的那个、清空排队、或者把显存放出来。',
@@ -3124,7 +3292,7 @@ export function apply(ctx, config) {
   })
 
   // ── 7. comfy_review ────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_review',
     description:
       '让指定模型看一张刚生成的图，判断是否满足要求；不满意就按模型的修改意见自动重生成，'
@@ -3286,7 +3454,7 @@ export function apply(ctx, config) {
   })
 
   // ── 8. comfy_upscale ────────────────────────────────────────────────────
-  ctx.tools.register({
+  registerComfyTool({
     name: 'comfy_upscale',
     description:
       '用算法（ImageScale，默认 lanczos）放大一张已生成的图。'

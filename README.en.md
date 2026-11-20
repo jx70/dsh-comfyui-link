@@ -101,9 +101,13 @@ The preset declaration ships inside the plugin's own `cordis.patch.yml`, so inst
 
 ## Install
 
-> **Not on npm yet.** For now it installs from GitHub only — every command below carries the `github:` prefix. Don't use the bare-package-name form of `add`: the registry has no such package and nothing gets installed.
+From npm (recommended):
 
-From GitHub:
+```bash
+dsh plugin --profile web add dsh-comfyui-link
+```
+
+To follow the latest code, install from GitHub:
 
 ```bash
 dsh plugin --profile web add github:jx70/dsh-comfyui-link

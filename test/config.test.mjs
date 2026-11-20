@@ -305,6 +305,12 @@ test('生图模型下拉同时列 checkpoints 里的整合包，不再只认 dif
   assert.match(client, /drawGroupCheckpoint/)
   assert.match(client, /drawGroupUnet/)
   assert.match(client, /folders\.checkpoints/)
+  // 分组标题中性：不点名任何具体模型家族（光辉/Illustrious/SDXL/Flux/…）
+  assert.match(client, /drawGroupCheckpoint: '整合包（checkpoints，一个文件带 MODEL\/CLIP\/VAE）'/)
+  assert.match(client, /drawGroupCheckpoint: 'Checkpoints \(single-file MODEL\/CLIP\/VAE\)'/)
+  assert.doesNotMatch(client, /drawGroupCheckpoint: '[^']*(光辉|Illustrious|SDXL|Flux|Pony|NoobAI)/)
+  // 列表按 models.checkpoints 全量列出，不做任何按名字/类型的过滤
+  assert.match(client, /models\.checkpoints\.map\(\(name\) => h\('option', \{ key: name, value: name \}, name\)\)/)
   // 宿主那条路由必须把 checkpoints 一起发出来
   const index = read('index.js')
   assert.match(index, /checkpoints: index\.checkpoints \?\? \[\]/)
@@ -402,17 +408,13 @@ test('设置页真的能改字数预算：控件、EDITABLE、夹取范围三样
   assert.match(text, /'loraDocs\.maxChars':\s*4000/)
 })
 
-test('README 不许给出会装到别人包的 npm 安装命令', () => {
-  // 本包没发 npm。写成 `add dsh-comfyui-link` 会让读者从 registry 拉一个空名/别人的包。
+test('README 给出 npm 安装命令，且不再残留「暂未上传 npm」', () => {
+  // 1.9.1 起发布到 npm，`add dsh-comfyui-link` 是正确写法；GitHub / link 两种仍保留。
   const pkgName = pkg.name
-  const forbidden = new RegExp(`add\\s+${pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b(?!-)`)
-  for (const file of ['README.md', 'README.en.md', 'cordis.patch.yml', 'docs/DEVELOPMENT.md']) {
-    let text
-    try {
-      text = read(file)
-    } catch {
-      continue
-    }
-    assert.doesNotMatch(text, forbidden, `${file} 里出现了直接按包名安装的命令`)
+  const install = new RegExp(`add\\s+${pkgName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b(?!-)`)
+  for (const file of ['README.md', 'README.en.md']) {
+    const text = read(file)
+    assert.match(text, install, `${file} 里应给出 npm 安装命令`)
+    assert.doesNotMatch(text, /暂未上传 npm|Not on npm yet/i, `${file} 里不应再说「没发 npm」`)
   }
 })

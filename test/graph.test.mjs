@@ -323,3 +323,34 @@ test('ComfyError 带 code/status/detail', () => {
   assert.deepEqual(error.detail, { a: 1 })
   assert.ok(error instanceof Error)
 })
+
+test('createClient 把连接层的 fetch 错误统一归一成 OFFLINE（不漏裸 TypeError）', async () => {
+  // 这是 k35 的关键：comfy_run 等入口靠 ComfyError.code==='OFFLINE' 走「没在跑」文案。
+  // 只要有一种连接失败落到 NETWORK 或裸 TypeError，就会被当成普通错误 throw 出去。
+  const original = globalThis.fetch
+  const cases = [
+    { label: '裸 fetch failed', error: new TypeError('fetch failed'), code: 'OFFLINE' },
+    { label: 'ECONNREFUSED', error: Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNREFUSED' } }), code: 'OFFLINE' },
+    { label: 'ENOTFOUND', error: Object.assign(new Error('getaddrinfo ENOTFOUND'), { cause: { code: 'ENOTFOUND' } }), code: 'OFFLINE' },
+    { label: 'EHOSTUNREACH', error: Object.assign(new Error('EHOSTUNREACH'), { cause: { code: 'EHOSTUNREACH' } }), code: 'OFFLINE' },
+    { label: '超时', error: Object.assign(new Error('timeout'), { name: 'TimeoutError' }), code: 'TIMEOUT' },
+    { label: '其他网络错误', error: new Error('some weird network problem'), code: 'NETWORK' },
+  ]
+  try {
+    for (const { label, error, code } of cases) {
+      globalThis.fetch = async () => { throw error }
+      const client = createClient({ baseUrl: 'http://127.0.0.1:1', timeoutMs: 2000 })
+      await assert.rejects(
+        () => client.systemStats(),
+        (err) => {
+          assert.ok(err instanceof ComfyError, `${label}：应是 ComfyError，实际 ${err?.constructor?.name}`)
+          assert.equal(err.code, code, label)
+          return true
+        },
+        label,
+      )
+    }
+  } finally {
+    globalThis.fetch = original
+  }
+})
