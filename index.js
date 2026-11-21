@@ -54,7 +54,6 @@ export const Config = z.object({
     provider: z.string().default('').description('审图模型 provider；留空回退当前会话模型'),
     model: z.string().default('').description('审图模型 id；留空回退当前会话模型'),
     maxAttempts: z.number().step(1).min(1).max(5).default(1).description('最多重生成几次（1–5）'),
-    extra: z.string().default('').description('额外审图要求，如「角色必须还原银色长发」'),
   }).volatile(),
   img2img: z.object({ enabled: z.boolean().default(false).description('开启图生图（comfy_run mode="img2img"）') }).volatile(),
   upscale: z.object({ enabled: z.boolean().default(false).description('开启算法放大（comfy_upscale）') }).volatile(),
@@ -184,7 +183,7 @@ function unwrapVolatile(value) {
  * 默认：review/img2img/upscale 全关闭；draw.unet 留空（用文件夹里第一个）、draw.lora 关闭；
  * output.dir 留空（图就留在 ComfyUI 自己的 output 里，不额外复制）；
  * loraDocs.dir 留空（挂 LoRA 时不去找提示词文档），maxChars 默认 4000。
- * @returns {{review:{enabled,provider,model,maxAttempts,extra}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}, loraDocs:{dir:string,maxChars:number}}}
+ * @returns {{review:{enabled,provider,model,maxAttempts}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}, loraDocs:{dir:string,maxChars:number}}}
  */
 function readFeatureConfig(config) {
   const review = unwrapVolatile(config?.review) ?? {}
@@ -197,7 +196,6 @@ function readFeatureConfig(config) {
       provider: typeof review.provider === 'string' ? review.provider : '',
       model: typeof review.model === 'string' ? review.model : '',
       maxAttempts: Number.isInteger(review.maxAttempts) ? review.maxAttempts : 1,
-      extra: typeof review.extra === 'string' ? review.extra : '',
     },
     img2img: (unwrapVolatile(config?.img2img) ?? {}).enabled === true,
     upscale: (unwrapVolatile(config?.upscale) ?? {}).enabled === true,
@@ -2509,7 +2507,7 @@ export function apply(ctx, config) {
    * 给了 referenceRef 时，同时把参考图交给它，让它对照判断「角色/形象是否还原」。
    * @returns {Promise<{satisfied: boolean, score: number, feedback: string, newPrompt: string, raw: string}>}
    */
-  async function askReviewer(exec, { provider, model, imageRef, referenceRef, requirement, extra }) {
+  async function askReviewer(exec, { provider, model, imageRef, referenceRef, requirement }) {
     const service = llm()
     const system =
       '你是一个严格的图像审阅员。看图，对照用户的要求，判断这张图是否达标（满意/角色是否还原/要求是否满足）。'
@@ -2518,7 +2516,7 @@ export function apply(ctx, config) {
         : '')
       + '只输出一个 JSON 对象，不要输出任何别的文字，字段如下：'
       + '{"satisfied": true 或 false, "score": 0 到 10 的整数, "feedback": "一句话说清楚哪里不行（满意就给简短好评）", "new_prompt": "不满意时给出用于重画的、更具体完整的英文正向提示词；满意时给空字符串"}'
-    const text = `用户要求：${requirement}${extra ? `\n额外要求：${extra}` : ''}`
+    const text = `用户要求：${requirement}`
     const content = [
       { type: 'text', text },
       { type: 'image', attachment: imageRef },
@@ -3384,7 +3382,6 @@ export function apply(ctx, config) {
           imageRef: current.ref,
           referenceRef,
           requirement: args.requirement,
-          extra: features.review.extra,
         })
         reviewLog.push({
           attempt: round,

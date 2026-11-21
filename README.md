@@ -214,7 +214,6 @@ DSH 设置 → ComfyUI 桥。改动先在本地攒成草稿（顶部会提示「
 | | `provider` | 空 | 审图模型 provider；留空回退当前会话模型 |
 | | `model` | 空 | 审图模型 id；留空回退当前会话模型 |
 | | `maxAttempts` | 1 | 最多重生成几次（1–5） |
-| | `extra` | 空 | 额外审图要求（如「角色必须还原银色长发」） |
 | 功能开关 | `img2img.enabled` | 关 | 关掉时 `mode="img2img"` 会被拦下 |
 | | `upscale.enabled` | 关 | 关掉时 `comfy_upscale` 会被拦下 |
 | 输出 | `dir` | 空 | 图片另存目录；留空＝图只留在 ComfyUI 自己的 output 里。这里**没有输入框**，只有「选择」按钮（弹系统文件夹选择框）和一个「清除」按钮 |

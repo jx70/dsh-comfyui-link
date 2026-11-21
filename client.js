@@ -32,61 +32,58 @@ window.__ModuleLoader__.load({
     const LOCALES = {
       zh: {
         nav: 'ComfyUI 桥',
-        pageHint: '这些设置只影响本机的 ComfyUI 桥；改完点「保存」才写入。',
+        pageHint: '改完点「保存」才生效。',
         features: '功能开关',
-        featuresNote: '关掉之后对应的工具调用会被直接拒绝',
+        featuresNote: '关掉后对应工具会被拒绝',
         review: '审图',
         reviewNote: '生图后自动把关，不满意就重画',
         reviewEnabled: '开启审图',
         provider: '审图模型 provider',
-        providerHint: '留空 = 回退当前会话模型。',
+        providerHint: '留空 = 跟随当前会话',
         model: '审图模型 id',
-        modelHint: '留空 = 回退当前会话模型。',
+        modelHint: '留空 = 跟随当前会话',
         maxAttempts: '最多重生成几次',
-        extra: '额外审图要求',
-        extraHint: '如「角色必须还原银色长发」',
         img2img: '图生图（img2img）',
-        img2imgHint: 'comfy_run mode="img2img" 基于已有图重绘',
+        img2imgHint: '基于已有图重绘',
         upscale: '算法放大（upscale）',
-        upscaleHint: 'comfy_upscale 放大一张已生成的图',
+        upscaleHint: '放大一张已生成的图',
         output: '图片输出',
-        outputNote: '出图后额外复制一份到这个目录',
+        outputNote: '出图后额外复制一份到此处',
         outputDir: '输出目录',
-        outputDirHint: '点「选择」挑一个目录；留空 = 图只留在 ComfyUI 自己的 output 里。',
+        outputDirHint: '留空 = 图只留在 ComfyUI 的 output',
         outputEmpty: '没选（图留在 ComfyUI 的 output）',
         outputClear: '清除',
-        outputUnsupported: '这个平台没有系统文件夹选择框，输出目录在这里设不了；要改就写进 profile 的 cordis.patch.yml（output.dir）。',
+        outputUnsupported: '此平台无文件夹选择框；请改 cordis.patch.yml 的 output.dir',
         loraDocs: 'LoRA 提示词',
-        loraDocsNote: '挂 LoRA 出图时按内容挑一篇文档，把提示词并进 prompt',
+        loraDocsNote: '挂 LoRA 时按内容挑一篇并进 prompt',
         loraDocsDir: '提示词目录',
-        loraDocsHint: '目录里可以混放各种文档（角色说明、画风笔记、tag 清单都行），文件名也不必与 LoRA 名对齐 —— 挂 LoRA 出图时会读进来按内容挑最像的那篇，把提示词段并进 prompt。留空 = 不读任何文档。',
+        loraDocsHint: '可混放角色/画风/tag 文档，文件名不必对齐；留空不读',
         loraDocsEmpty: '没选（不读提示词文档）',
         loraDocsBudget: '字数预算',
-        loraDocsBudgetHint: '一篇文档最多并入 prompt 多少字（200–20000）。超了不硬切，优先在最后一个空行/换行/逗号处收口，余下多少字会在结果里写明。',
+        loraDocsBudgetHint: '每篇最多并入多少字（200–20000），超了在换行处收口',
         loraDocsFound: '已识别 {n} 篇候选（{m} 篇像提示词）',
         loraDocsReadFailed: '读不了这个目录',
         pick: '选择',
-        pickHint: '弹出系统文件夹选择框挑一个目录',
+        pickHint: '打开系统文件夹选择框',
         picking: '等待选择…',
         pickFailed: '打开选择框失败',
         choose: '选择审图模型',
-        chooseHint: '从能看图的模型里挑一个（留空 = 回退当前会话模型）',
+        chooseHint: '挑一个能看图的模型（留空 = 跟随当前会话）',
         loading: '正在读取模型列表…',
-        emptyModels: '没找到能看图的模型（可在设置里配置能看图的服务商）',
+        emptyModels: '没找到能看图的模型',
         loadFailed: '读取模型列表失败',
         save: '保存',
         saving: '保存中…',
         saved: '已保存',
         saveFailed: '保存失败',
         dirty: '有未保存的改动',
-        idleHint: '改动先留在本地，点「保存」才写入。输入框左侧的绘图控件是即时生效的。',
         auto: '跟随当前会话模型',
         unavailable: '该插件当前未加载，暂时无法配置。',
         readOnly: '本部署的设置为只读。',
         drawBar: '绘图',
         drawModel: '生图模型',
         drawAuto: '自动（默认模型）',
-        drawHint: '出图时用这个模型（整合包和三件套都能选）',
+        drawHint: '出图用的模型（整合包/三件套均可）',
         drawGroupUnet: '扩散模型（三件套）',
         drawGroupCheckpoint: '整合包（checkpoints，一个文件带 MODEL/CLIP/VAE）',
         allowLora: '允许挂 LoRA（点一下关掉）',
@@ -95,61 +92,58 @@ window.__ModuleLoader__.load({
       },
       en: {
         nav: 'ComfyUI Bridge',
-        pageHint: 'These settings only affect the local ComfyUI bridge; nothing is written until you press Save.',
+        pageHint: 'Nothing is saved until you press Save.',
         features: 'Feature switches',
-        featuresNote: 'Turning one off makes the matching tool call refuse outright',
+        featuresNote: 'Off = matching tool call refuses',
         review: 'Review',
         reviewNote: 'Auto-check after generation and regenerate on dissatisfaction',
         reviewEnabled: 'Enable review',
         provider: 'Review model provider',
-        providerHint: 'Empty = fall back to the current session model.',
+        providerHint: 'Empty = follow current session',
         model: 'Review model id',
-        modelHint: 'Empty = fall back to the current session model.',
+        modelHint: 'Empty = follow current session',
         maxAttempts: 'Max regenerate attempts',
-        extra: 'Extra review requirements',
-        extraHint: 'e.g. "the character must keep silver long hair"',
         img2img: 'Image-to-image (img2img)',
-        img2imgHint: 'comfy_run mode="img2img" redraws from an existing image',
+        img2imgHint: 'Redraw from an existing image',
         upscale: 'Algorithmic upscale',
-        upscaleHint: 'comfy_upscale enlarges an already-generated image',
+        upscaleHint: 'Enlarge an already-generated image',
         output: 'Image output',
-        outputNote: 'After generating, copy an extra image into this folder',
+        outputNote: 'Copy an extra image here after generating',
         outputDir: 'Output directory',
-        outputDirHint: 'Press Pick to choose a folder; empty = images stay in ComfyUI own output.',
+        outputDirHint: 'Empty = images stay in ComfyUI output',
         outputEmpty: 'Not chosen (images stay in ComfyUI own output)',
         outputClear: 'Clear',
-        outputUnsupported: 'This platform has no native folder picker, so the output directory cannot be set here; edit output.dir in the profile cordis.patch.yml instead.',
+        outputUnsupported: 'No folder picker here; edit output.dir in cordis.patch.yml',
         loraDocs: 'LoRA prompts',
-        loraDocsNote: 'When a LoRA is used, one document is picked by content and its prompt merged in',
+        loraDocsNote: 'On LoRA use, pick one doc by content and merge in',
         loraDocsDir: 'Prompt directory',
-        loraDocsHint: 'The folder may mix anything (character notes, style notes, tag lists) and file names need not match the LoRA — when a LoRA is used the closest document is picked by content and its prompt section merged into the prompt. Empty = read nothing.',
+        loraDocsHint: 'Mix character/style/tag docs; names need not match; empty = none',
         loraDocsEmpty: 'Not chosen (no prompt documents are read)',
         loraDocsBudget: 'Character budget',
-        loraDocsBudgetHint: 'How many characters of a document may be merged into the prompt (200–20000). When over, it cuts at the last blank line / newline / comma instead of mid-tag, and reports how much was left out.',
+        loraDocsBudgetHint: 'Max chars merged per doc (200–20000); cuts at line break',
         loraDocsFound: '{n} candidate(s) found ({m} look like prompts)',
         loraDocsReadFailed: 'Cannot read this directory',
         pick: 'Pick',
-        pickHint: 'Open the system folder picker',
+        pickHint: 'Open folder picker',
         picking: 'Waiting…',
         pickFailed: 'Could not open the folder picker',
         choose: 'Pick the review model',
-        chooseHint: 'Pick one image-capable model (empty = fall back to the current session model)',
+        chooseHint: 'Pick an image-capable model (empty = current session)',
         loading: 'Loading models…',
-        emptyModels: 'No image-capable models found (configure a provider that accepts images)',
+        emptyModels: 'No image-capable models found',
         loadFailed: 'Failed to load models',
         save: 'Save',
         saving: 'Saving…',
         saved: 'Saved',
         saveFailed: 'Save failed',
         dirty: 'Unsaved changes',
-        idleHint: 'Edits stay local until you press Save. The draw controls beside the composer apply immediately.',
         auto: 'Follow the current session model',
         unavailable: 'This plugin is not loaded, so it cannot be configured right now.',
         readOnly: 'This deployment stores settings read-only.',
         drawBar: 'Draw',
         drawModel: 'Diffusion model',
         drawAuto: 'Auto (default model)',
-        drawHint: 'The model used for generation (checkpoints and standalone diffusion models both work)',
+        drawHint: 'Generation model (checkpoint or diffusion model)',
         drawGroupUnet: 'Diffusion models',
         drawGroupCheckpoint: 'Checkpoints (single-file MODEL/CLIP/VAE)',
         allowLora: 'LoRA allowed (click to turn off)',
@@ -159,16 +153,14 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-[data-comfy-settings]{display:flex;flex-direction:column;gap:12px;padding:2px 2px 8px;max-width:720px;}
+[data-comfy-settings]{--comfy-accent:#3b82f6;--comfy-accent-hover:#3b82f6;display:flex;flex-direction:column;gap:12px;padding:2px 2px 8px;max-width:720px;}
 [data-comfy-page-title]{display:flex;flex-direction:column;gap:2px;padding:0 2px 4px;}
 [data-comfy-title]{font-size:16px;font-weight:500;line-height:24px;color:var(--dsw-alias-label-primary,inherit);}
 [data-comfy-sec]{display:flex;flex-direction:column;gap:12px;padding:12px 14px;
-  border:.5px solid var(--dsw-alias-settings-card-stroke,var(--dsw-alias-border-l3,rgba(128,128,128,.28)));
   background:var(--dsw-alias-settings-card-fill,transparent);border-radius:var(--dsw-radius-xl,16px);}
 [data-comfy-fields]{display:flex;flex-direction:column;gap:12px;}
 [data-comfy-switches]{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px;}
 [data-comfy-switches] [data-comfy-row]{padding:10px 12px;align-items:center;
-  border:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));
   border-radius:var(--dsw-radius-md,12px);background:var(--dsw-alias-bg-layer-1,transparent);}
 [data-comfy-switches] [data-comfy-label]{font-weight:400;}
 [data-comfy-sec-head]{display:flex;flex-direction:column;gap:2px;}
@@ -180,7 +172,7 @@ window.__ModuleLoader__.load({
 [data-comfy-note]{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary,#9aa0a6);margin-top:2px;}
 [data-comfy-sw]{flex:none;width:38px;height:22px;border-radius:11px;border:0;cursor:pointer;position:relative;
   background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.35));transition:background .15s;padding:0;margin-top:2px;}
-[data-comfy-sw][data-on]{background:var(--dsw-alias-brand-primary);}
+[data-comfy-sw][data-on]{background:var(--comfy-accent,var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary)));}
 [data-comfy-sw] i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;
   background:var(--dsw-alias-switch-thumb);transition:left .15s;display:block;}
 [data-comfy-sw][data-on] i{left:19px;}
@@ -189,7 +181,7 @@ window.__ModuleLoader__.load({
   font-size:13px;
   border:.5px solid var(--dsw-alias-border-l4,var(--dsw-alias-border-l3,rgba(128,128,128,.28)));
   background:var(--dsw-alias-bg-layer-1,transparent);color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
-[data-comfy-input]:focus{outline:none;border-color:var(--dsw-alias-state-business-primary);}
+[data-comfy-input]:focus{outline:none;border-color:var(--comfy-accent);}
 [data-comfy-input][disabled]{opacity:.6;cursor:default;}
 [data-comfy-num]{width:88px;}
 [data-comfy-path]{box-sizing:border-box;padding:7px 10px;border-radius:var(--dsw-radius-md,12px);font-size:13px;line-height:18px;
@@ -204,7 +196,7 @@ window.__ModuleLoader__.load({
 @media (hover:hover){[data-comfy-clear]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover-danger,rgba(239,68,68,.12));
   color:var(--dsw-alias-state-error-primary);}}
 [data-comfy-clear]:focus-visible{outline:none;
-  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--comfy-accent));}
 [data-comfy-clear][disabled]{opacity:.4;cursor:default;}
 [data-comfy-pick]{flex:none;height:28px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;
   font-family:inherit;font-size:12px;line-height:18px;
@@ -212,7 +204,7 @@ window.__ModuleLoader__.load({
   background:0 0;color:var(--dsw-alias-label-primary,inherit);transition:background .15s;}
 @media (hover:hover){[data-comfy-pick]:hover:not([disabled]){background:var(--dsw-alias-interactive-bg-hover,rgba(128,128,128,.14));}}
 [data-comfy-pick]:focus-visible{outline:none;
-  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--comfy-accent));}
 [data-comfy-pick][disabled]{opacity:.4;cursor:default;}
 [data-comfy-select]{width:100%;box-sizing:border-box;padding:0 32px 0 10px;height:32px;
   border-radius:var(--dsw-radius-md,12px);font-size:13px;cursor:pointer;appearance:none;
@@ -221,7 +213,7 @@ window.__ModuleLoader__.load({
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-position:right 12px center;background-repeat:no-repeat;background-size:12px 12px;
   color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
-[data-comfy-select]:focus{outline:none;border-color:var(--dsw-alias-state-business-primary);}
+[data-comfy-select]:focus{outline:none;border-color:var(--comfy-accent);}
 [data-comfy-select][disabled]{opacity:.6;cursor:default;}
 [data-comfy-msg]{font-size:12px;line-height:18px;padding:10px 12px;border-radius:var(--dsw-radius-lg,16px);
   background:var(--dsw-alias-bg-layer-2,rgba(128,128,128,.14));color:var(--dsw-alias-label-tertiary,#9aa0a6);}
@@ -233,15 +225,14 @@ window.__ModuleLoader__.load({
 [data-comfy-status][data-ok]{color:var(--dsw-alias-state-success-primary);}
 [data-comfy-btn]{flex:none;height:36px;padding:0 14px;border-radius:var(--dsw-radius-md,12px);border:0;cursor:pointer;
   font-family:inherit;font-size:14px;line-height:22px;
-  background:var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary));
+  background:var(--comfy-accent,var(--dsw-alias-button-primary-fill,var(--dsw-alias-brand-primary)));
   color:var(--dsw-alias-label-primary-foreground);transition:background .15s,opacity .15s;}
-@media (hover:hover){[data-comfy-btn]:hover:not([disabled]){background:var(--dsw-alias-button-primary-hover,var(--dsw-alias-brand-primary));}}
-[data-comfy-btn][disabled]{opacity:.4;cursor:default;}
+@media (hover:hover){[data-comfy-btn]:hover:not([disabled]){background:var(--comfy-accent-hover,var(--dsw-alias-button-primary-hover,var(--dsw-alias-brand-primary)));}}
+[data-comfy-btn][disabled]{cursor:default;}
 [data-comfy-btn]:focus-visible{outline:none;
-  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
-[data-comfy-savebar]{display:flex;align-items:center;gap:10px;padding:12px 2px 0;
-  border-top:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));
-  position:sticky;bottom:0;background:var(--dsw-alias-bg-base,transparent);}
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--comfy-accent));}
+[data-comfy-savebar]{display:flex;align-items:center;gap:10px;padding:0 2px 8px;
+  border-bottom:.5px solid var(--dsw-alias-border-l2,rgba(127,127,127,.16));}
 [data-comfy-drawbar]{display:flex;align-items:center;gap:6px;min-width:0;}
 [data-comfy-mini]{max-width:190px;box-sizing:border-box;height:26px;padding:0 24px 0 8px;border-radius:var(--dsw-radius-sm,8px);
   font-size:12px;cursor:pointer;appearance:none;
@@ -250,7 +241,7 @@ window.__ModuleLoader__.load({
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   background-position:right 8px center;background-repeat:no-repeat;background-size:12px 12px;
   color:var(--dsw-alias-label-primary,inherit);font-family:inherit;}
-[data-comfy-mini]:focus{outline:none;border-color:var(--dsw-alias-state-business-primary);}
+[data-comfy-mini]:focus{outline:none;border-color:var(--comfy-accent);}
 [data-comfy-mini][disabled]{opacity:.6;cursor:default;}
 /* 展开的选项列表由浏览器自己画表面色，必须显式给底色与字色 —— 靠继承会在暗色下糊成白字白底 */
 [data-comfy-mini] option,
@@ -259,10 +250,10 @@ window.__ModuleLoader__.load({
 [data-comfy-chip]{flex:none;height:26px;padding:0 10px;border-radius:var(--dsw-radius-sm,8px);cursor:pointer;font-family:inherit;
   font-size:12px;line-height:24px;border:.5px solid var(--dsw-alias-border-l3,rgba(128,128,128,.35));
   background:0 0;color:var(--dsw-alias-label-secondary,#9aa0a6);transition:background .15s,color .15s;}
-[data-comfy-chip][data-on]{background:var(--dsw-alias-brand-primary);
-  border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-label-primary-foreground);}
+[data-comfy-chip][data-on]{background:var(--comfy-accent,var(--dsw-alias-brand-primary));
+  border-color:var(--comfy-accent,var(--dsw-alias-brand-primary));color:var(--dsw-alias-label-primary-foreground);}
 [data-comfy-chip]:focus-visible{outline:none;
-  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--dsw-alias-state-business-primary));}
+  box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--comfy-accent));}
 [data-comfy-chip][disabled]{opacity:.4;cursor:default;}
 `
 
@@ -515,7 +506,6 @@ window.__ModuleLoader__.load({
       ['review', 'provider'],
       ['review', 'model'],
       ['review', 'maxAttempts'],
-      ['review', 'extra'],
       ['img2img', 'enabled'],
       ['upscale', 'enabled'],
       ['output', 'dir'],
@@ -596,7 +586,6 @@ window.__ModuleLoader__.load({
           provider: pick('review', 'provider') ?? '',
           model: pick('review', 'model') ?? '',
           maxAttempts: pick('review', 'maxAttempts') ?? 1,
-          extra: pick('review', 'extra') ?? '',
         },
         img2img: { enabled: pick('img2img', 'enabled') === true },
         upscale: { enabled: pick('upscale', 'enabled') === true },
@@ -678,12 +667,26 @@ window.__ModuleLoader__.load({
             ? t('saved')
             : ops.length > 0
               ? t('dirty')
-              : t('idleHint')
+              : ''
 
       return h('div', { 'data-comfy-settings': '' },
         h('div', { 'data-comfy-page-title': '' },
           h('div', { 'data-comfy-title': '' }, t('nav')),
           h('div', { 'data-comfy-sub': '' }, t('pageHint'))),
+
+        /* 保存（攒够一批再一次写回；对话栏那两个选项不走这里）——固定在页首，不随下面的卡片滚动 */
+        h('div', { 'data-comfy-savebar': '' },
+          h('button', {
+            'data-comfy-btn': '',
+            type: 'button',
+            disabled: Boolean(disabled) || status === 'saving' || ops.length === 0,
+            onClick: save,
+          }, status === 'saving' ? t('saving') : t('save')),
+          h('div', {
+            'data-comfy-status': '',
+            'data-bad': status === 'error' ? '' : undefined,
+            'data-ok': status === 'saved' ? '' : undefined,
+          }, noteText)),
 
         disabled ? h('div', { 'data-comfy-msg': '' }, t('readOnly')) : null,
 
@@ -713,11 +716,6 @@ window.__ModuleLoader__.load({
               label: t('maxAttempts'), numeric: true,
               value: view.review.maxAttempts, disabled,
               onChange: (v) => set('review', 'maxAttempts', v),
-            }),
-            h(TextRow, {
-              label: t('extra'), note: t('extraHint'),
-              value: view.review.extra, disabled,
-              onChange: (v) => set('review', 'extra', v),
             }))),
 
         /* 功能开关：图生图 / 放大 */
@@ -827,20 +825,6 @@ window.__ModuleLoader__.load({
           docsPickError
             ? h('div', { 'data-comfy-note': '', 'data-bad': '' }, docsPickError)
             : null),
-
-        /* 保存（攒够一批再一次写回；对话栏那两个选项不走这里） */
-        h('div', { 'data-comfy-savebar': '' },
-          h('button', {
-            'data-comfy-btn': '',
-            type: 'button',
-            disabled: Boolean(disabled) || status === 'saving' || ops.length === 0,
-            onClick: save,
-          }, status === 'saving' ? t('saving') : t('save')),
-          h('div', {
-            'data-comfy-status': '',
-            'data-bad': status === 'error' ? '' : undefined,
-            'data-ok': status === 'saved' ? '' : undefined,
-          }, noteText)),
       )
     }
 

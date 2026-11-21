@@ -55,7 +55,6 @@ test('Config 给全套默认值：指向本机 8188，三个开关全关、绘�
     provider: '',
     model: '',
     maxAttempts: 1,
-    extra: '',
   })
   assert.deepEqual(unwrap(value.img2img), { enabled: false })
   assert.deepEqual(unwrap(value.upscale), { enabled: false })
@@ -81,7 +80,7 @@ test('六个功能段都是 volatile（改完即时生效）', () => {
 test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', () => {
   const value = Config({
     baseUrl: 'http://192.168.1.9:8188',
-    review: { enabled: true, provider: 'p', model: 'm', maxAttempts: 3, extra: '角色必须还原' },
+    review: { enabled: true, provider: 'p', model: 'm', maxAttempts: 3 },
     img2img: { enabled: true },
     upscale: { enabled: true },
     draw: { unet: 'some-model.safetensors', lora: true },
@@ -91,7 +90,6 @@ test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', ()
   assert.equal(value.baseUrl, 'http://192.168.1.9:8188')
   const review = unwrap(value.review)
   assert.equal(review.maxAttempts, 3)
-  assert.equal(review.extra, '角色必须还原')
   assert.equal(unwrap(value.img2img).enabled, true)
   assert.equal(unwrap(value.upscale).enabled, true)
   assert.deepEqual(unwrap(value.draw), { unet: 'some-model.safetensors', lora: true })
@@ -366,15 +364,14 @@ test('绘图控件的底色与字色都用主题里真实存在的 token', () =>
 
 test('设置页的配色一律走主题 token，不硬编码品牌色与错误色', () => {
   const text = read('client.js')
-  // 硬编码 #3b82f6 在换主题后不会跟着变，暗色下对比度也不受主题保证。
-  assert.doesNotMatch(text, /#3b82f6/i)
+  // #3b82f6 是有意用的强调蓝（与刷B站插件一致的品牌蓝），通过 --comfy-accent 变量定义。
+  assert.match(text, /--comfy-accent:\s*#3b82f6/i)
   assert.doesNotMatch(text, /#ef4444/i)
   assert.doesNotMatch(text, /#93c5fd/i)
   assert.doesNotMatch(text, /#fff\b/i)
   // 出厂设置页那套 token：卡片底/描边、品牌色、主按钮、反色前景、开关滑块、状态色。
   for (const token of [
     '--dsw-alias-settings-card-fill',
-    '--dsw-alias-settings-card-stroke',
     '--dsw-alias-brand-primary',
     '--dsw-alias-button-primary-fill',
     '--dsw-alias-label-primary-foreground',
@@ -393,9 +390,10 @@ test('设置页用卡片分块，不再用分隔线', () => {
   const sec = text.match(/\[data-comfy-sec\]\{[^}]*\}/)
   assert.ok(sec, '没有 [data-comfy-sec] 规则')
   assert.doesNotMatch(sec[0], /border-bottom/)
+  // 选项卡片不要任何边框，只留底色 + 圆角分块
+  assert.doesNotMatch(sec[0], /border\s*:/)
   assert.match(sec[0], /border-radius:var\(--dsw-radius-xl/)
   assert.match(sec[0], /var\(--dsw-alias-settings-card-fill/)
-  assert.match(sec[0], /var\(--dsw-alias-settings-card-stroke/)
 })
 
 test('设置页真的能改字数预算：控件、EDITABLE、夹取范围三样都得在', () => {

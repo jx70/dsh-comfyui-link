@@ -199,7 +199,6 @@ The page follows the look of the shipped settings pages: every group is a card (
 | | `provider` | empty | Review model provider; empty falls back to the current session model |
 | | `model` | empty | Review model id; empty falls back to the current session model |
 | | `maxAttempts` | 1 | Max redraws (1–5) |
-| | `extra` | empty | Extra review requirements (e.g. "the character must have silver hair") |
 | Feature switches | `img2img.enabled` | off | When off, `mode="img2img"` is rejected |
 | | `upscale.enabled` | off | When off, `comfy_upscale` is rejected |
 | Output | `dir` | empty | Where fetched images are copied; empty keeps them only in ComfyUI own output. **No text field here** — only the **Pick** button (native folder dialog) and a **Clear** button |
