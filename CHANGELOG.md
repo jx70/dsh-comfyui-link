@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-11-21
+
+### 新增
+
+- **工作流分析器 `comfy_inspect`**：读一份工作流 JSON（`graph` 对象或 `path` 文件路径，API / UI 格式都认），自动识别 Checkpoint / 三件套 / LoRA / 采样器 / 提示词 / 尺寸 / ControlNet / 输出等关键节点，建立连线关系，列出 Agent 可改参数，并对结构做诊断。输出五栏：关键节点 / 连接关系 / 可改参数 / 诊断 / 子图（另有 UI 未解析参数栏）。
+- **三层架构**：`lib/format-adapter.mjs` 负责格式适配（UI ↔ API），`lib/inspector.mjs` 是纯函数语义核心（只吃 API 图，零网络、零 UI 知识），`index.js` 的 `comfy_inspect` 负责编排渲染。核心里的架构断言钉死 `widgets_values` 等 UI 概念不得渗透。
+- **UI Widget 不做位置映射**：UI 格式的 Widget 值只按位置保存，按位置绑到参数名必然错位、会给 Agent 错误信息。分析器只给参数名与原始 `widgets_values`，不绑定值，并提示用 Save (API Format) 导出才能精确改值；被连线覆盖的 widget 不进可改参数。
+- **六类结构诊断**：`DUPLICATE_NODE_ID` / `DUPLICATE_LINK_ID` / `OUTPUT_SLOT_OUT_OF_RANGE` / `LINK_TABLE_MISMATCH` / `TYPE_MISMATCH` / `MISSING_REQUIRED_INPUT`。UI 连线对 links 表、`inputs[].link`、`outputs[].links` 三处交叉对账，缺一处就报；top 与每个子图各算一个作用域，跨作用域同号 ID 不误报。
+- **子图基本识别**：只报 id、名称、节点数、连线数、输入输出端口、边界盒与实例节点，不解析子图内部逻辑、不并入顶层参数。
+
+### 测试
+
+- 新增 `test/inspector.test.mjs`（7 条：节点分类 / API 图校验 / 连线 / 四类诊断 / 可改参数 / 汇总与文本 / 架构断言）与 `test/format-adapter.test.mjs`（12 条：双格式识别 / UI 结构提取 / 误映射回归 / 重复 ID / 槽位越界 / 三向对账 / 类型不匹配 / 缺输入 / 跨作用域隔离 / 子图识别 / 不改原图 / 坏结构报错）。`test/registration.test.mjs` 加 `comfy_inspect` 注册与冒烟断言，工具数 9 → 10。
+
 ## [1.9.1] - 2026-11-20
 
 ### 修复

@@ -1,13 +1,14 @@
 /**
  * index.js —— ComfyUI 控制插件（Host 侧）
  * ============================================================================
- * 装好之后模型会多出 6 个工具：
+ * 装好之后模型会多出 10 个工具：
  *   comfy_status   服务 / 显存 / 队列 / 任务状态
  *   comfy_models   有哪些模型文件可用
  *   comfy_node     某个节点类接受哪些输入（搭自定义工作流时查）
  *   comfy_run      提交任务（内置文生图模板，或直接给它一份 API 格式的工作流）
  *   comfy_result   等任务跑完，取回输出图（图真的会交给模型看）
  *   comfy_control  取消 / 中断 / 清队列 / 放显存
+ *   comfy_inspect  工作流分析器：读工作流 JSON，识别关键节点 / 连线 / 可改参数 / 诊断 / 子图
  *
  * 这里**不 import 任何 @deepseek-ai/* 包**：工具定义直接用标准 JSON Schema 写。
  * ctx.tools.register 只校验 output.schema 和名字，不要求 defineTool 那层包装，
@@ -35,6 +36,8 @@ import {
   sleep,
   summarizeGraph,
 } from './lib/comfy.mjs'
+import { parseWorkflow } from './lib/format-adapter.mjs'
+import { describeInspection, inspectWorkflow } from './lib/inspector.mjs'
 
 export const name = 'comfyui'
 export const inject = ['tools', 'systemPrompt']
@@ -3690,6 +3693,101 @@ export function apply(ctx, config) {
     },
   })
 
+  // ── 10. comfy_inspect ─────────────────────────────────────────────────
+  registerComfyTool({
+    name: 'comfy_inspect',
+    description:
+      '工作流分析器：读一份工作流 JSON（API 格式、UI 格式或本地 JSON 文件路径都行），'
+      + '识别 Checkpoint / 三件套 / LoRA / 采样器 / 提示词 / 尺寸 / ControlNet / 输出等关键节点，'
+      + '建立连线关系，列出 Agent 可以改的参数，并做连线一致性诊断（重复 ID / 槽位越界 / 类型不匹配 / 缺关键输入等）。'
+      + 'UI 格式只识别连线与参数名，Widget 值不绑定到参数（按位置保存，不可靠）；'
+      + '要精确改参数请用 ComfyUI 的 Save (API Format) 导出后再 inspect。第一版对 subgraph 只报边界与节点数，不解析内部。',
+    parameters: params({
+      graph: { type: 'object', additionalProperties: true, description: '工作流 JSON 对象。API 格式 { "1": { class_type, inputs } } 或 UI 格式 { nodes: [...], links: [...] }' },
+      path: s('本地工作流 JSON 文件路径（和 graph 二选一；两个都给时以 graph 为准）'),
+      compact: { type: 'boolean', description: 'true（默认）时限制输出条数，避免长工作流刷屏' },
+    }, []),
+    output: output(),
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const hasGraph = args.graph !== undefined && args.graph !== null && typeof args.graph === 'object'
+      const hasPath = typeof args.path === 'string' && args.path.trim().length > 0
+      if (!hasGraph && !hasPath) {
+        return { text: '至少给一个输入源：graph（工作流 JSON 对象）或 path（本地 JSON 文件路径）。' }
+      }
+
+      let input
+      let source = 'graph'
+      if (hasGraph) {
+        input = args.graph
+      } else {
+        const raw = args.path.trim()
+        source = `path ${raw}`
+        let text
+        try {
+          text = await readFile(raw, 'utf8')
+        } catch (error) {
+          return { text: `读不了 ${raw}：${error?.code ?? error?.message ?? error}` }
+        }
+        try {
+          input = JSON.parse(text.replace(/^\uFEFF/, ''))
+        } catch (error) {
+          return { text: `${raw} 不是合法 JSON：${error?.message ?? error}` }
+        }
+      }
+
+      let parsed
+      try {
+        parsed = parseWorkflow(input)
+      } catch (error) {
+        return { text: `工作流解析失败（${source}）：${error?.message ?? error}` }
+      }
+
+      let result
+      try {
+        result = inspectWorkflow(parsed.graph, {
+          diagnostics: parsed.diagnostics,
+          subgraphs: parsed.subgraphs,
+        })
+      } catch (error) {
+        return { text: `工作流分析失败（${source}）：${error?.message ?? error}` }
+      }
+
+      const lines = [`输入源：${source}`, describeInspection(result, { compact: args.compact !== false })]
+
+      if (parsed.warnings.length > 0) {
+        lines.push('', '── 提示 ──', ...parsed.warnings.map((w) => `  ! ${w}`))
+      }
+
+      if (parsed.subgraphs.length > 0) {
+        lines.push('', '── 子图（只识别边界，未解析内部）──')
+        for (const sub of parsed.subgraphs) {
+          const ins = sub.inputs.map((p) => p.name).join(', ') || '（无）'
+          const outs = sub.outputs.map((p) => p.name).join(', ') || '（无）'
+          lines.push(`  ${sub.name} [${sub.id}]：${sub.nodeCount} 节点 / ${sub.linkCount} 连线`
+            + ` · 输入端口 ${ins} · 输出端口 ${outs}`
+            + (sub.instances.length > 0 ? ` · 实例节点 ${sub.instances.join(',')}` : ''))
+          if (sub.bounds.input || sub.bounds.output) {
+            lines.push(`    边界：in=${JSON.stringify(sub.bounds.input)} out=${JSON.stringify(sub.bounds.output)}`)
+          }
+        }
+      }
+
+      if (parsed.unresolved.length > 0) {
+        lines.push('', '── 未解析的 UI 参数（只有参数名，没有可靠的值）──')
+        for (const u of parsed.unresolved) {
+          const names = u.params.join(', ') || '（无 widget 名）'
+          lines.push(`  [${u.nodeId}] ${u.nodeType}${u.title ? `「${u.title}」` : ''}：参数 ${names}`
+            + ` · 原始 widgets_values ${JSON.stringify(u.widgetsValues)}`)
+        }
+      }
+
+      lines.push('', `输入格式：${parsed.format === 'api' ? 'API（参数值是执行契约，可精确修改）' : 'UI（编辑器状态，参数值不可靠）'}`
+        + ` · 诊断 ${result.diagnostics.length} 条 · 子图 ${result.subgraphs.length} 个`)
+      return { text: lines.join('\n') }
+    },
+  })
+
   // ── 只读路由：设置页的审图模型清单 + 对话栏的生图模型清单 ──────────────
   // 浏览器半端没有 llm 服务、也没有 comfy 客户端（client 侧只有
   // slots/locale/configForms 等），所以这两份清单必须由宿主开只读路由给它取。
@@ -3893,6 +3991,11 @@ export function apply(ctx, config) {
                 + '字数预算默认 4000、设置页可调 200–20000，管的是「并进去的 tag 一共多少字」；结果里会写明并的是哪一套服装、'
                 + '锚点多少字、共多少字、负面多少字；要看没挑中的那几套传 rest:true，要看整篇传 full:true。'
                 + '传 lora_doc:"off" 可以只对这一次跳过。',
+              '工作流分析：拿到一份工作流 JSON，先用 comfy_inspect 看清结构 —— 它会列出关键节点、连线、Agent 可改参数和诊断（重复 ID / 断链 / 槽位越界 / 类型不匹配 / 缺关键输入）。'
+                + 'UI 格式（有 nodes/links 数组）的 Widget 值是按位置保存的，comfy_inspect 只给参数名不绑定值；'
+                + '要精确修改参数，请让对方用 ComfyUI 的 Save (API Format) 导出后再 inspect。'
+                + '发现子图时 comfy_inspect 只报边界与节点数，不解析内部；要分析子图内部请单独导出它。'
+                + '连线有诊断时先看诊断栏再动手。',
               '1024×1024 在消费级显卡上单张通常要几十秒到两分钟，所以 comfy_result 要带 wait_seconds（单张 120，多张按张数加）。',
               '显存吃紧时 batch 保持 1；要腾地方用 comfy_control free_vram。',
             ].join('\n'),

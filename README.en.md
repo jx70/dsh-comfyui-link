@@ -19,7 +19,7 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 
 ## Features
 
-- **Nine tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
+- **Ten tools** covering everything from liveness checks to image output — the model never needs to know ComfyUI's HTTP API.
 - **Review loop**: after a render, the designated vision model judges it; if unsatisfied, the plugin re-renders from its suggested prompt until the result passes or the attempt limit is hit. Pass a reference image to compare character fidelity.
 - **A built-in Draw mode**: alongside Standard / Minimal / PTC / Create there is a `draw` preset whose session starts as a rendering assistant, with an image-model picker and a LoRA toggle at the left of the composer (invisible in every other mode).
 - **Draft-then-save settings**: address, review model, the img2img / upscale switches, and the image output directory are edited locally as a draft and written to the profile only when you press **Save**; no DSH restart needed once written.
@@ -32,7 +32,7 @@ This plugin turns that loop into tools: the model submits the job itself, waits 
 
 ## Tools
 
-Nine tools become available to the model:
+Ten tools become available to the model:
 
 | Tool | What it does |
 | --- | --- |
@@ -45,6 +45,17 @@ Nine tools become available to the model:
 | `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity, and `save_to` to keep a copy |
 | `comfy_upscale` | Algorithmic upscale (`ImageScale`, lanczos by default) of an already generated image, with optional `save_to` |
 | `comfy_lora_doc` | Look inside the LoRA prompt directory: pass `lora` for the matching document's tag blocks and negative block (add `prompt` to preview the pick by the outfit you named; `rest: true` for the outfits left out, `full: true` for the whole file), omit it to list everything. It never throws — it just explains the situation |
+| `comfy_inspect` | **Workflow inspector**: read a workflow JSON (`graph` object or `path` file, API or UI format), identify Checkpoint / three-file loaders / LoRA / sampler / prompt / dimensions / ControlNet / output nodes, build the connections, list parameters the agent can change, and diagnose duplicate IDs / dangling links / out-of-range slots / type mismatches / missing required inputs. UI-format widget values are stored by position and unreliable, so they are shown as names only and never bound to values — use Save (API Format) to edit precisely. Subgraphs report only boundaries and node counts, not internals |
+
+### Workflow inspector (`comfy_inspect`)
+
+Given a workflow JSON, call `comfy_inspect` to see its structure before acting. Three layers:
+
+- **Format adapter** (`lib/format-adapter.mjs`): recognises API format `{ "1": { class_type, inputs } }` and UI format `{ nodes, links }`. UI is editor state: its link data (top-level links table + node inputs/outputs) is reliable and converted into an API-shaped graph; widget values are stored **by position only** and are **never** bound to parameter names by position — it shows the parameter names and the raw `widgets_values`, and tells you to Save (API Format) for precise edits.
+- **Semantic core** (`lib/inspector.mjs`): pure functions, API graph only, zero network and zero UI knowledge. Labels nodes, builds edges, lists editable parameters (all `confidence: exact`), and emits diagnostics. A source assertion pins that `widgets_values` never appears in the core.
+- **Diagnostics**: six codes — `DUPLICATE_NODE_ID` / `DUPLICATE_LINK_ID` / `OUTPUT_SLOT_OUT_OF_RANGE` / `LINK_TABLE_MISMATCH` (three-way cross-check between inputs and the links table) / `TYPE_MISMATCH` / `MISSING_REQUIRED_INPUT`. UI links are cross-checked across three places (links table, `inputs[].link`, `outputs[].links`). `top` and each subgraph are separate scopes, so identical IDs across scopes are not flagged.
+
+Output has five sections: key nodes / connections / editable parameters / diagnostics / subgraphs (plus a UI-unresolved section). A subgraph shows only id, name, node count, link count, input/output ports, bounding boxes and instance nodes; its internals are not analysed.
 
 ## Draw mode
 
@@ -340,7 +351,9 @@ Redraws **keep the base image's dimensions** (rounded to a multiple of 16) — a
 Three layers with clear boundaries:
 
 - `lib/comfy.mjs` — pure HTTP client + workflow construction (`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` …), **imports nothing from `@deepseek-ai/*`**, runs standalone
-- `index.js` — the host plugin: registers 9 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and four routes: `GET /api/comfyui/vision-models` (review models), `GET /api/comfyui/draw-models` (render models and LoRAs), `GET /api/comfyui/lora-docs` (prompt documents) and `POST /api/comfyui/pick-directory` (native folder dialog)
+- `index.js` — the host plugin: registers 10 tools, a system-prompt section, a schemastery `Config` (from which the settings form is generated), and four routes: `GET /api/comfyui/vision-models` (review models), `GET /api/comfyui/draw-models` (render models and LoRAs), `GET /api/comfyui/lora-docs` (prompt documents) and `POST /api/comfyui/pick-directory` (native folder dialog)
+- `lib/format-adapter.mjs` — workflow format adapter (UI ↔ API), with UI link three-way cross-check and subgraph boundary detection
+- `lib/inspector.mjs` — workflow semantic core (pure functions, API graph only)
 - `client.js` — the browser half, two pieces of UI: the "ComfyUI Bridge" page in the `settings.section` slot (draft + save) and the draw control in `conversation.input.left` (Draw mode only)
 
 `index.js` also does `import z from '@deepseek-ai/schemastery'` to declare `export const Config`, which is why `dependencies` contains that one package and nothing else at runtime.

@@ -1,7 +1,7 @@
 {
   "name": "dsh-comfyui-link",
-  "version": "1.9.1",
-  "description": "DSH 的 ComfyUI 桥：9 个工具直连本机 ComfyUI，支持文生图 / 图生图 / LoRA / 算法放大 / 自带工作流，并可指定审图模型看后把关、不满自动重画；自带「绘图模式」预设，输入框左侧可选生图模型与 LoRA；LoRA 提示词文档可指定目录，挂 LoRA 时自动并入 prompt",
+  "version": "1.10.0",
+  "description": "DSH 的 ComfyUI 桥：10 个工具直连本机 ComfyUI，支持文生图 / 图生图 / LoRA / 算法放大 / 自带工作流 / 工作流分析器（识别关键节点、连线、可改参数、诊断与子图），并可指定审图模型看后把关、不满自动重画；自带「绘图模式」预设，输入框左侧可选生图模型与 LoRA；LoRA 提示词文档可指定目录，挂 LoRA 时自动并入 prompt",
   "keywords": [
     "dsh",
     "dsh-plugin",
@@ -14,6 +14,7 @@
     "lora",
     "upscale",
     "workflow",
+    "workflow-inspector",
     "agent-preset"
   ],
   "license": "MIT",
@@ -51,7 +52,7 @@
   ],
   "icon": "./icon.svg",
   "scripts": {
-    "test": "node --test test/config.test.mjs test/registration.test.mjs test/graph.test.mjs test/offline-k35.test.mjs test/polling-k37.test.mjs test/output.test.mjs test/picker.test.mjs test/lora-docs.test.mjs",
+    "test": "node --test test/config.test.mjs test/registration.test.mjs test/graph.test.mjs test/offline-k35.test.mjs test/polling-k37.test.mjs test/output.test.mjs test/picker.test.mjs test/lora-docs.test.mjs test/format-adapter.test.mjs test/inspector.test.mjs",
     "smoke": "node scripts/offline.mjs",
     "smoke:live": "node scripts/offline.mjs --live",
     "e2e": "node scripts/e2e.mjs",

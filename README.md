@@ -19,7 +19,7 @@
 
 ## 特性
 
-- **9 个工具**覆盖从探活到出图的全链路，模型不需要你会 ComfyUI 的 HTTP API。
+- **10 个工具**覆盖从探活到出图的全链路，模型不需要你会 ComfyUI 的 HTTP API。
 - **审图闭环**：出图后交给指定的视觉模型判定，不满意就按它给的新提示词重画，循环到满意或达上限；给一张参考图还能比对角色还原度。
 - **自带「绘图模式」**：在标准 / 极简 / PTC / 创造之外多一个 `draw` 预设，会话一进去就是出图助手的人设，输入框左侧还有生图模型与 LoRA 开关（其余模式看不到这两个控件）。
 - **设置页草稿 + 保存**：地址、审图模型、img2img / 放大开关、图片输出目录在设置页里改，本地先攒成草稿，点「保存」才写进 profile；写的是配置层，不重启 DSH 也即时生效。
@@ -32,7 +32,7 @@
 
 ## 工具
 
-装上之后，模型手里会多出 9 个工具：
+装上之后，模型手里会多出 10 个工具：
 
 | 工具 | 干什么 |
 | --- | --- |
@@ -45,6 +45,17 @@
 | `comfy_review` | **审图重生成**：让指定模型看图判断是否满意，不满自动按它的意见重画，循环到满意或达上限；给 `reference_prompt_id` 还能比对角色还原度，也能 `save_to` 另存 |
 | `comfy_upscale` | 用算法（ImageScale，默认 lanczos）放大一张已生成的图，也能 `save_to` 另存 |
 | `comfy_lora_doc` | 查「LoRA 提示词」目录里的文档：给 `lora` 返回对得上那篇的 tag 段与负面段（再给 `prompt` 就按你点名的服装预演；`rest: true` 看没挑中的那几套，`full: true` 看全文），不给就列出全部。不抛错，只说明情况 |
+| `comfy_inspect` | **工作流分析器**：读一份工作流 JSON（`graph` 对象或 `path` 文件路径，API / UI 格式都行），识别 Checkpoint / 三件套 / LoRA / 采样器 / 提示词 / 尺寸 / ControlNet / 输出等关键节点、建立连线关系、列出 Agent 可改参数，并诊断重复 ID / 断链 / 槽位越界 / 类型不匹配 / 缺关键输入。UI 格式的 Widget 值按位置保存、不可靠，只给参数名不绑定值；要精确改参数请用 Save (API Format) 导出。子图只报边界与节点数，不解析内部 |
+
+### 工作流分析器 `comfy_inspect`
+
+拿到一份 workflow JSON，先 `comfy_inspect` 看清结构再动手。它分三层：
+
+- **格式适配**（`lib/format-adapter.mjs`）：认 API 格式 `{ "1": { class_type, inputs } }` 与 UI 格式 `{ nodes, links }`。UI 是编辑器状态，连线信息（顶层 links 表 + 节点 inputs/outputs）可靠、会转成 API 结构；Widget 值只按位置保存，**绝不**按位置绑到参数名 —— 只显示参数名与原始 `widgets_values`，并提示用 Save (API Format) 导出才能精确改值。
+- **语义核心**（`lib/inspector.mjs`）：纯函数、只吃 API 图，零网络、零 UI 知识。给节点打语义标签、建边、列可改参数（全标 `confidence: exact`）、出诊断。架构断言钉死核心里不出现 `widgets_values`。
+- **诊断**：六类码 —— `DUPLICATE_NODE_ID` / `DUPLICATE_LINK_ID` / `OUTPUT_SLOT_OUT_OF_RANGE` / `LINK_TABLE_MISMATCH`（输入侧与 links 表三向对账）/ `TYPE_MISMATCH` / `MISSING_REQUIRED_INPUT`。UI 连线三处（links 表、`inputs[].link`、`outputs[].links`）交叉对账，缺一处就报。top 与每个子图各算一个作用域，跨作用域同号 ID 不误报。
+
+输出五栏：关键节点 / 连接关系 / 可改参数 / 诊断 / 子图（另有 UI 未解析参数栏）。子图只显示 id、名称、节点数、连线数、输入输出端口、边界盒与实例节点，不解析子图内部逻辑。
 
 ## 绘图模式
 
@@ -353,7 +364,9 @@ masterpiece, 1girl, silver long hair, red eyes, black dress
 三层，彼此的边界很清楚：
 
 - `lib/comfy.mjs` —— 纯 HTTP 客户端 + 工作流构造（`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` 等），**不 import 任何 `@deepseek-ai/*`**，能脱离 DSH 单独跑
-- `index.js` —— Host 插件，注册 9 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册四条路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）、`GET /api/comfyui/lora-docs`（提示词文档清单）、`POST /api/comfyui/pick-directory`（弹系统文件夹选择框）
+- `index.js` —— Host 插件，注册 10 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册四条路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）、`GET /api/comfyui/lora-docs`（提示词文档清单）、`POST /api/comfyui/pick-directory`（弹系统文件夹选择框）
+- `lib/format-adapter.mjs` —— 工作流格式适配层（UI ↔ API），含 UI 连线三向对账与子图边界识别
+- `lib/inspector.mjs` —— 工作流语义分析核心（纯函数，只吃 API 图）
 - `client.js` —— 浏览器半端，两处 UI：`settings.section` 槽位里的「ComfyUI 桥」设置页（草稿 + 保存），以及 `conversation.input.left` 槽位里的绘图控件（只在绘图模式渲染）
 
 `index.js` 里除了工具，还 `import z from '@deepseek-ai/schemastery'` 用来定义 `export const Config`。所以 `dependencies` 里只有它，没有别的运行期依赖。

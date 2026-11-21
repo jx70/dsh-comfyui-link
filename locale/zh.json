@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "ComfyUI 桥",
-    "description": "让 Agent 直接操作本地 ComfyUI：搭工作流、写提示词、调参数、提交任务，并把出图取回来。"
+    "description": "让 Agent 直接操作本地 ComfyUI：搭工作流、写提示词、调参数、分析工作流结构、提交任务，并把出图取回来。"
   }
 }

@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "ComfyUI Bridge",
-    "description": "Drive a local ComfyUI from the agent: build workflows, write prompts, tune parameters, queue jobs, and get the generated images back."
+    "description": "Drive a local ComfyUI from the agent: build workflows, write prompts, tune parameters, inspect workflow structure, queue jobs, and get the generated images back."
   }
 }
