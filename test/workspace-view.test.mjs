@@ -241,8 +241,10 @@ test('resolveWorkflow：查不到给可读提示，不抛错', async () => {
 
 // ── 路由注册与行为 ────────────────────────────────────────────────────────
 
-function startFakeComfy() {
+function startFakeComfy(options = {}) {
   const promptIds = []
+  // historyWithImage=true 时 /history 返回一条带产出图的记录，模拟「换了电脑、没有旁侧索引」。
+  const historyWithImage = !!options.historyWithImage
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost')
@@ -294,7 +296,10 @@ function startFakeComfy() {
     }
     if (req.method === 'GET' && url.pathname === '/history') {
       res.writeHead(200, { 'content-type': 'application/json' })
-      res.end(JSON.stringify({}))
+      const hist = historyWithImage
+        ? { 'hist-img': { prompt: [0, GRAPH, {}], outputs: { '9': { images: [{ filename: 'from-history.png', type: 'output', subfolder: 'dsh' }] } } } }
+        : {}
+      res.end(JSON.stringify(hist))
       return
     }
     if (req.method === 'GET' && url.pathname === '/view') {
@@ -352,6 +357,30 @@ test('snapshot 路由：返回在线状态 / 队列 / jobs / 最近生成', asyn
       assert.deepEqual(data.schedulers, ['simple', 'karras', 'normal'])
       assert.equal(data.loras.length, 2)
       assert.equal(data.loras[0].name, 'detail_tuner.safetensors')
+    })
+  } finally { await comfy.close() }
+})
+
+test('snapshot 路由：没有旁侧索引时把 history 里有图的任务合成进 generated（换了电脑也能看产出图）', async () => {
+  const comfy = await startFakeComfy({ historyWithImage: true })
+  try {
+    await withTempRoot(async (root) => {
+      const fake = createFakeCtx()
+      plugin.apply(fake.ctx, { baseUrl: comfy.baseUrl, outputRoot: root })
+      const route = routeOf(fake.routes, '/api/comfyui/workspace/snapshot')
+      const res = await route.fetch(new Request('http://x/api/comfyui/workspace/snapshot'))
+      const data = await res.json()
+      // 索引为空，generated 也应从 history 补出这条带图的记录。
+      assert.equal(data.generated.length, 1)
+      const rec = data.generated[0]
+      assert.equal(rec.promptId, 'hist-img')
+      assert.equal(rec.source, 'history')
+      assert.equal(rec.files[0].filename, 'from-history.png')
+      assert.equal(rec.params.prompt, 'a cat')
+      assert.equal(rec.params.steps, 20)
+      // 队列 jobs 也带上同一张图，三处共用同一数据源。
+      const withImg = data.jobs.find((j) => Array.isArray(j.images) && j.images.length)
+      if (withImg) assert.equal(withImg.images[0].filename, 'from-history.png')
     })
   } finally { await comfy.close() }
 })

@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-11-22
+
+### 修复
+
+- **没有旁侧索引的机器（换了电脑）产出图片页 / 工作流选择列表空白**：此前这两处只读旁侧索引 `generated`，索引文件不存在时列表为空；队列因走 `jobs[].images` 正常有图。现在快照时用 ComfyUI 原生 `/history` 把有产出图的任务合成成生成记录补进 `generated`（带 `graph` / `params` / `files`、不落盘），三处共用同一份数据：产出图片页能出缩略图、工作流选择列表能出缩略图并可直接点选（带 graph 免反查）、队列保持正常。合成记录按 `createdAt` 排在索引记录之后，索引里已有的按 prompt_id 去重补全逻辑不变。
+- 新增回归用例：`snapshot` 路由在无索引时把 `/history` 里有图的任务合成进 `generated`（209/209 测试通过）。
+
 ## [1.11.0] - 2026-11-22
 
 ### 新增

@@ -44,6 +44,7 @@ import {
   extractWorkflowParams,
   resolveWorkflow,
   safeFilename,
+  historyToRecord,
 } from './lib/workspace-store.mjs'
 
 export const name = 'comfyui'
@@ -4021,15 +4022,28 @@ export function apply(ctx, config) {
           try { await workspaceStore.updateFiles(rec.promptId, images) } catch { /* 回写失败不影响本次展示 */ }
         }
       }
-      // 索引里没有对应记录的 job（例如从 ComfyUI 网页端提交的任务），
-      // 也从 history 里把产出图带上，视图端才能出缩略图。
+      // 别的电脑没有旁侧索引，generated 会是空的 —— 产出图片页就白屏。
+      // 把 /history 里有图的任务合成成生成记录补进来，让产出图片页 / 队列 /
+      // 工作流选择器共用同一份数据（队列此前已靠 jobs[].images 出图）。
+      const knownIds = new Set(generated.map((rec) => String(rec?.promptId ?? '')))
       const imagesById = new Map()
       if (Array.isArray(historyList)) {
         for (const h of historyList) {
-          const imgs = collectImages(h.entry)
-          if (imgs.length) imagesById.set(String(h.promptId), imgs)
+          const pid = String(h?.promptId ?? '')
+          const imgs = h?.entry ? collectImages(h.entry) : []
+          if (imgs.length) imagesById.set(pid, imgs)
+          // 索引里没这条 → 合成一条展示记录（不落盘）
+          if (pid && !knownIds.has(pid)) {
+            const rec = historyToRecord(pid, h.entry)
+            if (rec) {
+              generated.push(rec)
+              knownIds.add(pid)
+            }
+          }
         }
       }
+      // 最近生成的排前面：合成的 history 记录没 createdAt，放索引记录之后。
+      generated.sort((a, b) => String(b?.createdAt ?? '').localeCompare(String(a?.createdAt ?? '')))
       const jobsWithImages = (Array.isArray(jobs) ? jobs : []).map((job) => {
         const id = String(job?.id ?? job?.prompt_id ?? '')
         const imgs = id ? imagesById.get(id) : null
