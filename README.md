@@ -9,7 +9,7 @@
 
 > English: [README.en.md](./README.en.md)
 
-**目录** · [它解决什么问题](#它解决什么问题) · [特性](#特性) · [工具](#工具) · [绘图模式](#绘图模式) · [前置条件](#前置条件) · [安装](#安装) · [快速上手](#快速上手) · [设置页](#设置页) · [LoRA 提示词文档](#lora-提示词文档) · [配置](#配置) · [工作原理](#工作原理) · [桌面端](#桌面端) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题) · [开发](#开发) · [踩过的坑](#踩过的坑)
+**目录** · [它解决什么问题](#它解决什么问题) · [特性](#特性) · [工具](#工具) · [会话视图「ComfyUI」页](#会话视图comfyui页) · [绘图模式](#绘图模式) · [前置条件](#前置条件) · [安装](#安装) · [快速上手](#快速上手) · [设置页](#设置页) · [LoRA 提示词文档](#lora-提示词文档) · [配置](#配置) · [工作原理](#工作原理) · [桌面端](#桌面端) · [兼容性与已知限制](#兼容性与已知限制) · [常见问题](#常见问题) · [开发](#开发) · [踩过的坑](#踩过的坑)
 
 ## 它解决什么问题
 
@@ -28,7 +28,8 @@
 - **graph 模式接管任意工作流**：在 ComfyUI 里导出 API 格式的 JSON，直接交给模型跑，提示词和种子都能改。
 - **Web 与 Desktop 同一个包**：桌面端（Electron）页面是 `dsh-app://app/`，插件靠能力探测切到 preload 的 `__DSH_TRANSPORT__` 与 `__DSH_DIRECTORY_PICKER__`，浏览器里仍走原来的路。
 - **LoRA 提示词文档**：设置页里挑一个目录，一篇文档对应一个 LoRA；挂 LoRA 出图时会自动读对应那篇，把提示词段并进 `prompt`，并在结果里说明命中了哪篇。不选目录就一个文件都不读。
-- **可验证**：121 条纯单测 + 7 个探针脚本，全都不需要你手点。
+- **会话视图「ComfyUI」页**：会话顶部视图切换多一个入口，把生图工作流搬到界面上 —— 节点图可视化、图上改参重提交、浏览产出图、看队列，还能拿本机 ComfyUI 生成的任一图反查它当时的工作流。
+- **可验证**：208 条纯单测 + 7 个探针脚本，全都不需要你手点。
 
 ## 工具
 
@@ -56,6 +57,29 @@
 - **诊断**：六类码 —— `DUPLICATE_NODE_ID` / `DUPLICATE_LINK_ID` / `OUTPUT_SLOT_OUT_OF_RANGE` / `LINK_TABLE_MISMATCH`（输入侧与 links 表三向对账）/ `TYPE_MISMATCH` / `MISSING_REQUIRED_INPUT`。UI 连线三处（links 表、`inputs[].link`、`outputs[].links`）交叉对账，缺一处就报。top 与每个子图各算一个作用域，跨作用域同号 ID 不误报。
 
 输出五栏：关键节点 / 连接关系 / 可改参数 / 诊断 / 子图（另有 UI 未解析参数栏）。子图只显示 id、名称、节点数、连线数、输入输出端口、边界盒与实例节点，不解析子图内部逻辑。
+
+## 会话视图「ComfyUI」页
+
+会话顶部视图切换里多一个 **ComfyUI**（在 对话 / 轨迹 / 上下文 / 编辑 之后）。它把生图工作流搬到界面上，三块标签：
+
+| 标签 | 干什么 |
+| --- | --- |
+| 工作流 | 节点图 + 参数编辑器。节点按类别配色（LoRA / 模型加载 / 文本编码 / 潜变量 / 采样器 / VAE / 输出），每个节点带一句用途说明；点下方图例能高亮该类节点。右侧改提示词 / 宽高 / 步数 / CFG / 种子 / 采样器 / 调度器 / LoRA，点「改参重提交」直接排队重画 |
+| 产出图片 | 缩略图网格，点开放大；放大层里能一键跳该图的工作流 |
+| 队列 | 在跑 / 排队 / 最近完成。每行带缩略图、短 id、`#序号`、节点数、状态、尺寸、步数、提示词摘要 |
+
+**本机图 → 工作流反查**：看本机 ComfyUI（`127.0.0.1:8188`）生成的任一图，能取回它当时用的完整工作流 —— 节点图、参数、种子、采样器全都在，并且可以直接在这个页面上改参重生成。
+
+数据来源有两条，按顺序试：
+
+1. **旁侧索引** `<输出根>/_dsh_meta/prompt-index.jsonl` —— 出图时把 `promptId` + `graph` + `params` + `files` 写进去，不依赖 ComfyUI 的历史是否被清掉。
+2. **ComfyUI 原生历史** `GET /history/{prompt_id}` —— 索引没命中时兜底，扫 outputs 按文件名匹配。
+
+索引里 `files` 为空的记录（只用过 `comfy_run` 提交、没调过 `comfy_result` 的任务）会在打开页面时用 `/history` 自动补全并回写；索引里压根没有的 job（比如从 ComfyUI 网页端提交的）也会从历史带上产出图。查不到就给一句可读提示，ComfyUI 没启动就给空态。
+
+**LoRA 增删改**：LoRA 不是一个逗号文本框，而是列表 —— 每行一个 LoRA（下拉选文件 + 模型强度 + 文本强度 + 删除按钮），底部「+ 添加 LoRA」。增删会重建 model/clip 链：只改名字强度时原地改；增删重排时删掉旧节点、按新顺序串链、把 `KSampler` 的 model 与 `CLIPTextEncode` 的 clip 改指向新链尾；全删退回基座 checkpoint。
+
+这一页与对话工具共用同一份数据源（同一个 `lib/comfy.mjs` 客户端、同一个索引文件），所以界面上看到的队列就是 `comfy_status` 看到的队列。
 
 ## 绘图模式
 
@@ -346,7 +370,7 @@ masterpiece, 1girl, silver long hair, red eyes, black dress
 | `timeoutMs` | `20000` | 单次 HTTP 请求超时 |
 | `pollMs` | `2500` | `comfy_result` 轮询间隔 |
 | `maxWaitSeconds` | `900` | 单个任务最多等多久 |
-| `outputRoot` | `''` | 输出图在磁盘上的目录。**留空会自动从 `/system_stats` 的启动参数里认出 ComfyUI 装在哪**，一般不用填。这是「读」用的路径（插件据此拼原图路径、解析相对输出目录）；「另存一份」用的是设置页里的 `output.dir` |
+| `outputRoot` | `''` | 输出图在磁盘上的目录。**留空会自动从 `/system_stats` 的启动参数里认出 ComfyUI 装在哪**，一般不用填。这是「读」用的路径（插件据此拼原图路径、解析相对输出目录）；「另存一份」用的是设置页里的 `output.dir`。会话视图的图 → 工作流反查索引也落在这个目录下的 `_dsh_meta/prompt-index.jsonl` |
 
 `comfy_review` 的几个细节参数：
 
@@ -363,10 +387,11 @@ masterpiece, 1girl, silver long hair, red eyes, black dress
 三层，彼此的边界很清楚：
 
 - `lib/comfy.mjs` —— 纯 HTTP 客户端 + 工作流构造（`buildTxt2Img` / `buildImg2Img` / `buildUpscale` / `normalizeGraph` 等），**不 import 任何 `@deepseek-ai/*`**，能脱离 DSH 单独跑
-- `index.js` —— Host 插件，注册 10 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册四条路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）、`GET /api/comfyui/lora-docs`（提示词文档清单）、`POST /api/comfyui/pick-directory`（弹系统文件夹选择框）
+- `index.js` —— Host 插件，注册 10 个工具 + 一段系统提示 + 导出 schemastery `Config`（设置页据此生成表单），并注册路由：`GET /api/comfyui/vision-models`（审图模型清单）、`GET /api/comfyui/draw-models`（生图模型与 LoRA 清单）、`GET /api/comfyui/lora-docs`（提示词文档清单）、`POST /api/comfyui/pick-directory`（弹系统文件夹选择框），以及会话视图用的四条 —— `GET /api/comfyui/workspace/snapshot`（在线状态 / 队列 / jobs / 最近生成 / 采样器与 LoRA 枚举）、`GET /api/comfyui/workspace/workflow`（按 `promptId` 或 `filename` 反查工作流）、`GET /api/comfyui/workspace/image`（代理产出图）、`POST /api/comfyui/workspace/submit`（改参后写回工作流再提交）
 - `lib/format-adapter.mjs` —— 工作流格式适配层（UI ↔ API），含 UI 连线三向对账与子图边界识别
 - `lib/inspector.mjs` —— 工作流语义分析核心（纯函数，只吃 API 图）
-- `client.js` —— 浏览器半端，两处 UI：`settings.section` 槽位里的「ComfyUI 桥」设置页（草稿 + 保存），以及 `conversation.input.left` 槽位里的绘图控件（只在绘图模式渲染）
+- `lib/workspace-store.mjs` —— 会话视图的数据层：旁侧索引读写（`prompt-index.jsonl`，原子写、坏行跳过）、参数抽取 `extractWorkflowParams`、参数写回 `applyWorkflowParams`（含 LoRA 链重建）、图 → 工作流反查 `resolveWorkflow`（索引优先 + history 兜底）
+- `client.js` —— 浏览器半端，三处 UI：`settings.section` 槽位里的「ComfyUI 桥」设置页（草稿 + 保存）、`conversation.input.left` 槽位里的绘图控件（只在绘图模式渲染），以及 `conversation.view` 槽位里的 **ComfyUI 会话视图页**（节点图 / 参数编辑器 / 产出图 / 队列）
 
 `index.js` 里除了工具，还 `import z from '@deepseek-ai/schemastery'` 用来定义 `export const Config`。所以 `dependencies` 里只有它，没有别的运行期依赖。
 

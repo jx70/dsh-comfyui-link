@@ -20,12 +20,17 @@
 
 ```
 ┌───────────────────────────────────────────────┐
-│ client.js   浏览器半端（两处 UI）                │
+│ client.js   浏览器半端（三处 UI）                │
 │   ctx.slots.register('settings.section')       │
 │   ctx.slots.register('conversation.input.left')│
+│   ctx.slots.register('conversation.view')      │
 │   ctx.configForms.get('comfyui')               │
 │   hostFetch('/api/comfyui/vision-models')      │
 │   hostFetch('/api/comfyui/draw-models')        │
+│   hostFetch('/api/comfyui/workspace/snapshot') │
+│   hostFetch('/api/comfyui/workspace/workflow') │
+│   hostFetch('/api/comfyui/workspace/image')    │
+│   POST('/api/comfyui/workspace/submit')        │
 │   POST('/api/comfyui/pick-directory')          │
 │   ── 桌面端：__DSH_TRANSPORT__ / __DSH_DIRECTORY_PICKER__│
 └───────────────────────┬───────────────────────┘
@@ -33,13 +38,14 @@
 ┌───────────────────────▼───────────────────────┐
 │ index.js    Host 插件                          │
 │   export const name / inject / Config          │
-│   ctx.tools.register(...) × 8                  │
+│   ctx.tools.register(...) × 10                 │
 │   ctx.systemPrompt.section(...)                │
-│   ctx.connection.fetch.register(vision+draw+pick)│
+│   ctx.connection.fetch.register(vision+draw+pick+workspace×4)│
 └───────────────────────┬───────────────────────┘
                         │ fetch
 ┌───────────────────────▼───────────────────────┐
 │ lib/comfy.mjs   纯 HTTP 客户端 + 工作流构造    │
+│ lib/workspace-store.mjs  索引 / 参数写回 / 反查 │
 │   零 @deepseek-ai/* 依赖，可脱离 DSH 单跑      │
 └───────────────────────┬───────────────────────┘
                         │ HTTP

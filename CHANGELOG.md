@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.11.0] - 2026-11-22
+
+### 新增
+
+- **会话视图「ComfyUI」页**：会话顶部视图切换多一个 ComfyUI 选项，把生图工作流搬到界面上，不用再靠对话调工具看。
+  - **工作流节点图**：分层 DAG 布局（无入边排最左，依赖依次往右），自绘 SVG 贝塞尔连线 + 箭头，节点按 7 类配色（LoRA / 模型加载 / 文本编码 / 潜变量 / 采样器 / VAE / 输出）。每个节点带一句用途说明（14 种具体节点各有文案，未命中按类别兜底），参数键值直接显示在节点体上。
+  - **颜色图例可点**：点某个类别高亮该类节点、其余变暗，再点取消；切换工作流自动清空高亮。
+  - **图上改参重提交**：提示词 / 负面提示词 / 宽 / 高 / 步数 / CFG / 种子 / 采样器 / 调度器 / LoRA 都能改。采样器与调度器是从 `object_info` 取的枚举下拉，不用手打；宽高为 0 时按 1024 兜底，`EmptySD3LatentImage` / `EmptyFluxLatentImage` 等 latent 节点也能正确读出尺寸。
+  - **LoRA 增删改**：LoRA 从「一个逗号文本框」换成列表编辑器 —— 每行一个 LoRA（下拉选文件 + 模型强度 + 文本强度 + 删除按钮），底部「+ 添加 LoRA」。增删会重建 model/clip 链：只改名字强度时原地改；增删重排时删掉旧节点、按新顺序串链、把 KSampler 的 model 与 CLIPTextEncode 的 clip 改指向新链尾；全删退回基座 checkpoint。
+  - **浏览产出图片**：缩略图网格 + 点开放大（Lightbox），放大层里能直接跳该图的工作流。
+  - **队列视图**：在跑 / 排队 / 最近完成三段。每行带缩略图、短 id、`#序号`、节点数、状态、尺寸、步数、提示词摘要；点缩略图放大看图，右侧按钮才跳工作流。
+- **本机图 → 工作流反查**：看本机 ComfyUI 生成的任一图，能取回它当时用的完整工作流（节点图 + 参数 + 种子/采样器）并基于它改参重生成。
+  - 旁侧索引 `<输出根>/_dsh_meta/prompt-index.jsonl`：出图时把 `promptId + graph + params + files` 写进去，不依赖 ComfyUI 历史是否被清。
+  - 索引没命中时走 ComfyUI 原生 `GET /history/{prompt_id}` 兜底，扫 outputs 按文件名匹配。
+  - 索引里 `files` 为空的记录（只用过 `comfy_run` 提交、没调过 `comfy_result` 的任务）会在快照时用 `/history` 自动补全并回写；索引里没有的 job（例如从 ComfyUI 网页端提交的）也会从历史带上产出图。
+  - 查不到给可读提示（不抛错），无历史 / ComfyUI 未启动时给空态。
+- **四条工作区路由**：`GET /api/comfyui/workspace/snapshot`（在线状态 + 队列 + jobs + 最近生成 + 采样器/调度器/LoRA 枚举）、`GET /api/comfyui/workspace/workflow`（按 `promptId` 或 `filename` 反查）、`GET /api/comfyui/workspace/image`（代理产出图，校验文件名防路径穿越）、`POST /api/comfyui/workspace/submit`（改参后写回工作流再提交）。全部走 `connection.fetch.register`，与对话工具共用同一份数据源。
+
+### 变更
+
+- `client.js` 新增第三处槽位注入：`conversation.view`（`id: comfyui-workspace`，`order: 60`）。
+- `comfy_run` / `comfy_review` / `comfy_upscale` 的提交点统一走 `submitAndIndex()`，提交成功即写索引；`comfy_result` 取到图后回填文件名。
+- `comfy_run` 的 `title` 参数会记进索引，作为工作流选择列表里的名字。
+
+### 测试
+
+- 新增 `test/workspace-view.test.mjs`（15 条）：参数抽取 / 写回 / LoRA 链重建 / 文件名校验、索引 append / 查询 / 坏行跳过 / 去重合并、反查三分支（索引命中 / history 兜底 / 查不到）、4 条路由注册与行为。
+- 全套 **208** 条通过。
+
 ## [1.10.1] - 2026-11-21
 
 ### 变更

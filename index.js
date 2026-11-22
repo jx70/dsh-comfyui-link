@@ -38,6 +38,13 @@ import {
 } from './lib/comfy.mjs'
 import { parseWorkflow } from './lib/format-adapter.mjs'
 import { describeInspection, inspectWorkflow } from './lib/inspector.mjs'
+import {
+  applyWorkflowParams,
+  createWorkspaceStore,
+  extractWorkflowParams,
+  resolveWorkflow,
+  safeFilename,
+} from './lib/workspace-store.mjs'
 
 export const name = 'comfyui'
 export const inject = ['tools', 'systemPrompt']
@@ -2046,6 +2053,16 @@ const DRAW_ROUTE = '/api/comfyui/draw-models'
 /** 路由路径：GET /api/comfyui/lora-docs（设置页显示「已识别 N 篇」） */
 const LORA_DOCS_ROUTE = '/api/comfyui/lora-docs'
 
+// ── k91：会话视图「ComfyUI」页的数据路由 ──────────────────────────────────
+/** GET /api/comfyui/workspace/snapshot —— 一次拿齐队列 / 任务 / 最近生成记录 */
+const WORKSPACE_SNAPSHOT_ROUTE = '/api/comfyui/workspace/snapshot'
+/** GET /api/comfyui/workspace/workflow?promptId=|filename= —— 图 → 工作流反查 */
+const WORKSPACE_WORKFLOW_ROUTE = '/api/comfyui/workspace/workflow'
+/** GET /api/comfyui/workspace/image?filename=&subfolder=&type= —— 产出图代理 */
+const WORKSPACE_IMAGE_ROUTE = '/api/comfyui/workspace/image'
+/** POST /api/comfyui/workspace/submit —— 图上改完参数后重提交 */
+const WORKSPACE_SUBMIT_ROUTE = '/api/comfyui/workspace/submit'
+
 // ── 唯一一条会「等用户点按钮」的路由 ──────────────────────────────────────
 // 设置页的「选择」按钮要弹的是**系统原生**文件夹选择框，而原生对话框只能开在
 // 交互式会话里（宿主的 node 进程自己没有桌面），所以这里 spawn 一个
@@ -2116,6 +2133,32 @@ export function apply(ctx, config) {
   const settings = { ...DEFAULTS, ...(config ?? {}) }
   const client = createClient({ baseUrl: settings.baseUrl, timeoutMs: settings.timeoutMs })
   const waitForJob = createJobWaiter(client, settings)
+
+  // k91：图 → 工作流反查用的旁侧索引（输出根下 _dsh_meta/prompt-index.jsonl）。
+  // 索引写失败绝不能影响出图主流程，所有调用点都 try/catch 吞掉。
+  const workspaceStore = createWorkspaceStore({ getRoot: () => resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs)) })
+
+  /**
+   * 提交一张工作流，并顺手把 graph + promptId 记进索引。
+   * 所有提交入口（comfy_run / workspace submit / review / upscale）都走这里，
+   * 保证「本机图 → 工作流」永远查得到，不依赖 ComfyUI 历史是否被清。
+   */
+  async function submitAndIndex(graph, { signal, title = '', params = null } = {}) {
+    const submitted = await client.submit(graph, { signal })
+    if (submitted.ok) {
+      try {
+        await workspaceStore.append({
+          promptId: submitted.promptId,
+          createdAt: new Date().toISOString(),
+          graph,
+          params: params ?? extractWorkflowParams(graph),
+          files: [],
+          title,
+        })
+      } catch { /* 索引落盘失败不影响出图 */ }
+    }
+    return submitted
+  }
 
   // 保存一份最近一次用过的客户端配置，方便各工具报地址
   const where = () => client.baseUrl
@@ -2576,7 +2619,7 @@ export function apply(ctx, config) {
    * @returns {Promise<{promptId: string, ref: any, filename: string}>}
    */
   async function submitAndFetch(graph, signal, deadlineMs = 0) {
-    const submitted = await client.submit(graph, { signal })
+    const submitted = await submitAndIndex(graph, { signal, title: 'review/upscale', params: extractWorkflowParams(graph) })
     if (!submitted.ok) {
       const detail = submitted.nodeErrors
         ? `\n节点报错：${JSON.stringify(submitted.nodeErrors).slice(0, 2000)}`
@@ -3024,7 +3067,7 @@ export function apply(ctx, config) {
         throw new Error(`不认识的 mode "${mode}"，只能是 template、img2img 或 graph`)
       }
 
-      const submitted = await client.submit(graph, { signal })
+      const submitted = await submitAndIndex(graph, { signal, title: args.title ?? '', params: extractWorkflowParams(graph) })
       if (!submitted.ok) {
         const detail = submitted.nodeErrors
           ? `\n节点报错：${JSON.stringify(submitted.nodeErrors).slice(0, 2000)}`
@@ -3175,6 +3218,12 @@ export function apply(ctx, config) {
         lines.push('任务跑完了，但没有产出图片（这张工作流可能只输出别的东西）。')
         return { text: lines.join('\n') }
       }
+
+      // k91：把产出图与 prompt_id 的关联写进索引（图 → 工作流反查靠它）。
+      // 图还没跑完就把文件记进去也无妨，视图侧会把它当作最近生成记录。
+      try {
+        await workspaceStore.updateFiles(args.prompt_id, images)
+      } catch { /* 索引写失败不影响取图 */ }
 
       const saved = []
       let saveTo = ''
@@ -3940,6 +3989,198 @@ export function apply(ctx, config) {
       }), 'comfyui: /api/comfyui/pick-directory 路由')
     } catch (error) {
       log(`选择目录路由没挂上（输出目录只能在 profile 里配）：${error?.message ?? error}`)
+    }
+
+    // ── k91 会话视图「ComfyUI」页：快照 / 反查 / 图片 / 改参重提交 ──────────
+    // 从 object_info 的 KSampler 定义里取 sampler_name / scheduler 枚举
+    const enumOf = (info, key) => {
+      const raw = info?.input?.required?.[key] ?? info?.input?.optional?.[key]
+      return Array.isArray(raw) && Array.isArray(raw[0]) ? raw[0].filter((v) => typeof v === 'string') : []
+    }
+    const workspaceSnapshot = async () => {
+      const signal = AbortSignal.timeout(settings.timeoutMs)
+      const [queue, jobs, generated, samplerInfo, loraFiles, historyList] = await Promise.all([
+        client.queue({ signal }).catch(() => ({ queue_running: [], queue_pending: [] })),
+        client.jobs({ limit: 20, signal }).catch(() => []),
+        workspaceStore.recent(20).catch(() => []),
+        client.nodeInfo('KSampler', { signal }).catch(() => null),
+        client.models('loras', { signal }).catch(() => []),
+        client.history(40, { signal }).catch(() => []),
+      ])
+      // 索引里的记录只有经过 comfy_result 才会补上文件名；只用 comfy_run 提交过的任务
+      // files 会是空的，视图端就没缩略图。这里用原生 /history 兜底补全并回写索引。
+      const empty = generated.filter((rec) => !Array.isArray(rec?.files) || rec.files.length === 0)
+      if (empty.length && Array.isArray(historyList) && historyList.length) {
+        const byId = new Map(historyList.map((h) => [String(h.promptId), h.entry]))
+        for (const rec of empty) {
+          const entry = byId.get(String(rec.promptId))
+          if (!entry) continue
+          const images = collectImages(entry)
+          if (!images.length) continue
+          rec.files = images
+          try { await workspaceStore.updateFiles(rec.promptId, images) } catch { /* 回写失败不影响本次展示 */ }
+        }
+      }
+      // 索引里没有对应记录的 job（例如从 ComfyUI 网页端提交的任务），
+      // 也从 history 里把产出图带上，视图端才能出缩略图。
+      const imagesById = new Map()
+      if (Array.isArray(historyList)) {
+        for (const h of historyList) {
+          const imgs = collectImages(h.entry)
+          if (imgs.length) imagesById.set(String(h.promptId), imgs)
+        }
+      }
+      const jobsWithImages = (Array.isArray(jobs) ? jobs : []).map((job) => {
+        const id = String(job?.id ?? job?.prompt_id ?? '')
+        const imgs = id ? imagesById.get(id) : null
+        return imgs ? { ...job, images: imgs } : job
+      })
+      let online = true
+      let offlineReason = ''
+      try {
+        await client.systemStats({ signal })
+      } catch (error) {
+        online = false
+        offlineReason = explain(error)
+      }
+      return {
+        ok: true,
+        online,
+        offlineReason,
+        baseUrl: client.baseUrl,
+        queue: {
+          running: Array.isArray(queue?.queue_running) ? queue.queue_running : [],
+          pending: Array.isArray(queue?.queue_pending) ? queue.queue_pending : [],
+        },
+        jobs: jobsWithImages,
+        generated,
+        samplers: enumOf(samplerInfo, 'sampler_name'),
+        schedulers: enumOf(samplerInfo, 'scheduler'),
+        loras: Array.isArray(loraFiles) ? loraFiles : [],
+      }
+    }
+
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: WORKSPACE_SNAPSHOT_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async () => {
+          try {
+            return jsonResponse(await workspaceSnapshot())
+          } catch (error) {
+            return jsonResponse({ ok: false, error: explain(error) }, 500)
+          }
+        },
+      }), 'comfyui: /api/comfyui/workspace/snapshot 路由')
+    } catch (error) {
+      log(`工作区快照路由没挂上：${error?.message ?? error}`)
+    }
+
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: WORKSPACE_WORKFLOW_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          try {
+            const url = new URL(request.url)
+            const promptId = (url.searchParams.get('promptId') ?? '').trim()
+            const filename = (url.searchParams.get('filename') ?? '').trim()
+            if (!promptId && !safeFilename(filename)) {
+              return jsonResponse({ ok: false, reason: '要给 promptId 或 filename' }, 400)
+            }
+            const result = await resolveWorkflow({
+              store: workspaceStore,
+              client,
+              promptId,
+              filename,
+            })
+            return jsonResponse(result.ok ? result : { ok: false, ...result })
+          } catch (error) {
+            return jsonResponse({ ok: false, reason: explain(error) }, 500)
+          }
+        },
+      }), 'comfyui: /api/comfyui/workspace/workflow 路由')
+    } catch (error) {
+      log(`工作流反查路由没挂上：${error?.message ?? error}`)
+    }
+
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: WORKSPACE_IMAGE_ROUTE,
+        methods: ['GET'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          const url = new URL(request.url)
+          const filename = safeFilename(url.searchParams.get('filename'))
+          if (!filename) return jsonResponse({ ok: false, reason: '文件名不合法' }, 400)
+          const subfolder = (url.searchParams.get('subfolder') ?? '').trim()
+          // 防路径穿越：subfolder 只能是相对路径段，不能含 ..
+          if (subfolder.includes('..') || subfolder.includes('\\') || subfolder.startsWith('/')) {
+            return jsonResponse({ ok: false, reason: '子目录不合法' }, 400)
+          }
+          const type = ['output', 'temp', 'input'].includes(url.searchParams.get('type'))
+            ? url.searchParams.get('type')
+            : 'output'
+          try {
+            const bytes = await client.view({ filename, subfolder, type }, { signal: AbortSignal.timeout(settings.timeoutMs) })
+            const mediaType = sniffMediaType(bytes)
+            if (!mediaType) return jsonResponse({ ok: false, reason: '不是认识的图片格式' }, 415)
+            return new Response(bytes, {
+              status: 200,
+              headers: {
+                'content-type': mediaType,
+                'cache-control': 'no-store',
+                'content-length': String(bytes.length),
+              },
+            })
+          } catch (error) {
+            return jsonResponse({ ok: false, reason: explain(error) }, 502)
+          }
+        },
+      }), 'comfyui: /api/comfyui/workspace/image 路由')
+    } catch (error) {
+      log(`产出图代理路由没挂上：${error?.message ?? error}`)
+    }
+
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: WORKSPACE_SUBMIT_ROUTE,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          let payload
+          try {
+            const text = await request.text()
+            payload = JSON.parse(text)
+          } catch {
+            return jsonResponse({ ok: false, reason: '请求体要是 JSON' }, 400)
+          }
+          const rawGraph = payload?.graph
+          if (!rawGraph || typeof rawGraph !== 'object' || !Object.values(rawGraph).some((n) => n && typeof n === 'object' && 'class_type' in n)) {
+            return jsonResponse({ ok: false, reason: 'graph 必须是 API 格式的工作流' }, 400)
+          }
+          try {
+            // 视图上改的参数在这里写回原图：节点 id / 连线 / 其余节点原样保留。
+            const edited = payload?.params ? applyWorkflowParams(rawGraph, payload.params) : rawGraph
+            const normalized = normalizeGraph(edited)
+            const submitted = await submitAndIndex(normalized, {
+              signal: AbortSignal.timeout(settings.timeoutMs),
+              title: typeof payload.title === 'string' ? payload.title.slice(0, 120) : '视图改参重提交',
+              params: extractWorkflowParams(normalized),
+            })
+            if (!submitted.ok) {
+              return jsonResponse({ ok: false, reason: 'ComfyUI 拒了这张工作流', nodeErrors: submitted.nodeErrors ?? null }, 422)
+            }
+            return jsonResponse({ ok: true, promptId: submitted.promptId, number: submitted.number ?? null })
+          } catch (error) {
+            return jsonResponse({ ok: false, reason: explain(error) }, 500)
+          }
+        },
+      }), 'comfyui: /api/comfyui/workspace/submit 路由')
+    } catch (error) {
+      log(`改参重提交路由没挂上：${error?.message ?? error}`)
     }
   }
   if (typeof ctx.inject === 'function') {
