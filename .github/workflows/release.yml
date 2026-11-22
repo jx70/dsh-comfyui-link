@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: '只预演，不真正发布'
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 纯单测
+        run: npm test
+
+      - name: 冒烟
+        run: npm run smoke
+
+      - name: 版本与 tag 一致性检查
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag=$TAG package=$PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::tag v$TAG 与 package.json 的 $PKG 不一致"
+            exit 1
+          fi
+
+      - name: 预演
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
+        run: npm publish --dry-run
+
+      - name: 发布
+        if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && !inputs.dry_run)
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
