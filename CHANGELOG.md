@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### 文档
+
+- **README 精简**：`README.md` 从 497 行 / 46.7 KB 压到 128 行 / 5.6 KB，`README.en.md` 从 487 行 / 48.2 KB 压到 118 行 / 7.8 KB。只留必要内容：特性、工具表、前置条件、安装、快速上手（改成「想要 / 说什么 / 走哪条」一张表）、设置页、LoRA 提示词文档、配置、已知限制、开发、许可。
+- 删掉的是实现细节（`comfy_inspect` 三层架构与六类诊断码、会话视图三块标签逐条说明、文档打分表、tag 判定与服装切套算法、设置页视觉 token、文件夹选择框的四个细节、桌面端两条 preload 桥对照、常见问题 7 条、踩坑 12 条），这些在 `docs/DESIGN.md` 与 `docs/DEVELOPMENT.md` 里都有，README 末尾各留了一个链接指过去。
+- 顺手修一处笔误：英文版把 `ESRGAN` 写成了 `ESRM`。
+
 ## [1.11.2] - 2026-11-27
 
 ### 修复
