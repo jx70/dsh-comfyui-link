@@ -3,7 +3,7 @@
  * ============================================================================
  * 宿主对 tools.register 的入参有硬约束（字段白名单、output.schema、render 形状），
  * 违反了是运行时才炸。这里提前钉住：
- *   · 10 个工具都在，名字不重复
+ *   · 11 个工具都在，名字不重复
  *   · 每个工具的字段只用了宿主认的那几个
  *   · output.schema 是宿主能接受的最小 object schema
  *   · render 能吐 text 块，带图时吐 text + image
@@ -24,7 +24,7 @@ import { createExec, createFakeCtx } from './helpers/fake-ctx.mjs'
 const plugin = await import('../index.js')
 
 const EXPECTED_TOOLS = [
-  'comfy_status', 'comfy_models', 'comfy_node', 'comfy_run',
+  'comfy_status', 'comfy_models', 'comfy_capabilities', 'comfy_node', 'comfy_run',
   'comfy_result', 'comfy_control', 'comfy_review', 'comfy_upscale', 'comfy_lora_doc',
   'comfy_inspect',
 ]
@@ -70,6 +70,25 @@ function startFakeComfy(overrides = {}) {
       }))
       return
     }
+    if (req.method === 'GET' && req.url === '/object_info') {
+      // 全量节点表：够能力发现/关键词搜索用即可
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        TextEncodeQwenImage21: {
+          name: 'TextEncodeQwenImage21', display_name: 'Qwen Image 2.1 编辑', category: 'conditioning',
+          input: { required: { clip: ['CLIP', {}], prompt: ['STRING', {}], images: ['COMFY_AUTOGROW_V3', {}] } },
+        },
+        RMBG: {
+          name: 'RMBG', display_name: '背景去除', category: 'image',
+          input: { required: { image: ['IMAGE', {}] } },
+        },
+        KSampler: {
+          name: 'KSampler', display_name: 'KSampler', category: 'sampling',
+          input: { required: { model: ['MODEL', {}], steps: ['INT', {}] } },
+        },
+      }))
+      return
+    }
     if (req.method === 'POST' && req.url === '/prompt') {
       let body = ''
       req.on('data', (chunk) => { body += chunk })
@@ -104,7 +123,7 @@ test('不能有 default 导出（cordis 的 unwrapExports 会丢掉 inject）', 
   assert.equal(plugin.default, undefined)
 })
 
-test('10 个工具全部注册，名字与文档一致', () => {
+test('11 个工具全部注册，名字与文档一致', () => {
   const { tools } = boot()
   assert.deepEqual([...tools.keys()], EXPECTED_TOOLS)
 })
@@ -750,7 +769,7 @@ test('没有 connection 服务时安静跳过路由，不影响工具注册', ()
   delete fake.ctx.connection
   plugin.apply(fake.ctx, {})
   assert.equal(fake.routes.length, 0)
-  assert.equal(fake.tools.size, 10)
+  assert.equal(fake.tools.size, 11)
 })
 
 test('默认配置下三个功能开关全关，调用会被拦并提示去设置页 / 对话栏开', async () => {

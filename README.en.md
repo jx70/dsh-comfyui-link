@@ -11,7 +11,8 @@ Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) dr
 
 ## Features
 
-- **10 tools** covering status → generate → fetch → review → upscale → workflow analysis; no ComfyUI HTTP API knowledge needed.
+- **11 tools** covering status → capability discovery → generate → fetch → review → upscale → workflow analysis; no ComfyUI HTTP API knowledge needed.
+- **Capability discovery**: `comfy_capabilities` maps a task (remove overlay / matting / change background / local edit) to the machine's real models and nodes, so the agent stops guessing from world knowledge and reaching for Python/rembg.
 - **Review loop**: a vision model judges the image and rewrites the prompt until satisfied or the attempt cap is hit; pass a reference image to check character fidelity.
 - **Draw mode**: a `draw` preset with generation-model and LoRA controls left of the input box.
 - **LoRA prompt documents**: point at a folder; when a LoRA is used, the matching doc's tag section is merged into `prompt` and its negative section into `negative`.
@@ -23,8 +24,9 @@ Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) dr
 | Tool | What it does |
 | --- | --- |
 | `comfy_status` | Alive?, VRAM, queue, recent jobs |
-| `comfy_models` | Available model files; leads with the current draw config, loras carry character aliases |
-| `comfy_node` | Inputs, defaults, ranges for a node class |
+| `comfy_models` | Available model files (with capability tags and local capability hints); leads with the current draw config, loras carry character aliases |
+| `comfy_capabilities` | Reverse-lookup local capabilities and nodes by task; check this first for unfamiliar image tasks |
+| `comfy_node` | Inputs, defaults, ranges for a node class; also accepts a keyword to list candidates |
 | `comfy_run` | Submit: `template` txt2img (optional LoRA) / `img2img` / `graph` with your own API workflow |
 | `comfy_result` | Wait for the job and return the image (shown to the model) plus its path, optional `save_to` |
 | `comfy_control` | Cancel / interrupt / clear queue / free VRAM |

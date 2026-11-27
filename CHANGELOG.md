@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-11-28
+
+### 新增
+
+- **能力发现层，防止 agent 遇陌生模型误判**：新增 `lib/capabilities.mjs`（能力词典 + `slimObjectInfo` / `findCapabilities` / `labelModel` / `searchNodes` 纯函数），object_info 裁剪后进程内缓存 5 分钟，避免反复拉 2.3MB 全量。
+  - 新增第 11 个工具 `comfy_capabilities`：按任务用途（去遮挡 / 抠图 / 换背景 / 局部重绘 / 文生图 / 放大 / controlnet）反查本机真实存在的模型文件与节点类名、一句用途提示与关键输入；object_info 拿不到时降级为「内置词典 + 文件名」经验候选并标注未连本机验证；多候选全列不替用户选。
+  - `comfy_models` 每个模型按文件名模式附能力标签，并从 object_info 生成「本机能力线索」段，末尾提示遇陌生图任务先查能力、别直接上 Python/rembg/GrabCut。
+  - `comfy_node` 完整类名查不到时按关键词（如 qwen / inpaint / rmbg）从 object_info 列候选节点，打破「不知道类名就无从下手」的鸡生蛋。
+  - 系统提示固化「先查本机能力再动手」纪律和参考图指令编辑引导（qwen_image + TextEncodeQwenImage21 graph 直出，不必先算蒙版）。
+
 ### 文档
 
 - **README 精简**：`README.md` 从 497 行 / 46.7 KB 压到 128 行 / 5.6 KB，`README.en.md` 从 487 行 / 48.2 KB 压到 118 行 / 7.8 KB。只留必要内容：特性、工具表、前置条件、安装、快速上手（改成「想要 / 说什么 / 走哪条」一张表）、设置页、LoRA 提示词文档、配置、已知限制、开发、许可。

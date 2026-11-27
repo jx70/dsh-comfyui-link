@@ -1,14 +1,15 @@
 /**
  * index.js —— ComfyUI 控制插件（Host 侧）
  * ============================================================================
- * 装好之后模型会多出 10 个工具：
- *   comfy_status   服务 / 显存 / 队列 / 任务状态
- *   comfy_models   有哪些模型文件可用
- *   comfy_node     某个节点类接受哪些输入（搭自定义工作流时查）
- *   comfy_run      提交任务（内置文生图模板，或直接给它一份 API 格式的工作流）
- *   comfy_result   等任务跑完，取回输出图（图真的会交给模型看）
- *   comfy_control  取消 / 中断 / 清队列 / 放显存
- *   comfy_inspect  工作流分析器：读工作流 JSON，识别关键节点 / 连线 / 可改参数 / 诊断 / 子图
+ * 装好之后模型会多出 11 个工具：
+ *   comfy_status        服务 / 显存 / 队列 / 任务状态
+ *   comfy_models        有哪些模型文件可用（带能力标签与本机能力线索）
+ *   comfy_capabilities  按任务用途反查本机能力与配套节点（遇陌生图任务先查它）
+ *   comfy_node          某个节点类接受哪些输入；也可传关键词列候选节点
+ *   comfy_run           提交任务（内置文生图模板，或直接给它一份 API 格式的工作流）
+ *   comfy_result        等任务跑完，取回输出图（图真的会交给模型看）
+ *   comfy_control       取消 / 中断 / 清队列 / 放显存
+ *   comfy_inspect       工作流分析器：读工作流 JSON，识别关键节点 / 连线 / 可改参数 / 诊断 / 子图
  *
  * 这里**不 import 任何 @deepseek-ai/* 包**：工具定义直接用标准 JSON Schema 写。
  * ctx.tools.register 只校验 output.schema 和名字，不要求 defineTool 那层包装，
@@ -39,6 +40,7 @@ import {
 } from './lib/comfy.mjs'
 import { parseWorkflow } from './lib/format-adapter.mjs'
 import { describeInspection, inspectWorkflow } from './lib/inspector.mjs'
+import { findCapabilities, labelModel, searchNodes, slimObjectInfo } from './lib/capabilities.mjs'
 import {
   applyWorkflowParams,
   createWorkspaceStore,
@@ -2678,6 +2680,20 @@ export function apply(ctx, config) {
     return ctx.tools.register(definition)
   }
 
+  /**
+   * 全量 object_info（2.3MB）裁剪后的轻量节点表，进程内缓存 5 分钟。
+   * comfy_capabilities / comfy_models / comfy_node(关键词搜) 三处共用，避免反复拉全量。
+   */
+  let slimNodesCache = { at: 0, nodes: null }
+  async function getSlimNodes(signal) {
+    const now = Date.now()
+    if (slimNodesCache.nodes && now - slimNodesCache.at < 5 * 60 * 1000) return slimNodesCache.nodes
+    const info = await client.objectInfo({ signal })
+    const nodes = slimObjectInfo(info)
+    slimNodesCache = { at: now, nodes }
+    return nodes
+  }
+
   // ── 1. comfy_status ────────────────────────────────────────────────────
   registerComfyTool({
     name: 'comfy_status',
@@ -2775,13 +2791,20 @@ export function apply(ctx, config) {
       for (const line of describeDrawConfig(features, index)) lines.push(`  ${line}`)
       // 别名的证据在文档目录里；没配目录（或读不了）就只给文件名，不报错
       const aliasDocs = await loadDocAliasInputs(exec.signal)
+      // 能力标签只按文件名模式推；配套节点来自本机 object_info（拿不到就只给标签，不阻塞）
+      let slimNodes = []
+      try {
+        slimNodes = await getSlimNodes(exec.signal)
+      } catch { /* object_info 拉不到就只标文件名，不影响列模型 */ }
       lines.push('', '可用模型：')
       for (const folder of MODEL_FOLDERS) {
         const list = index[folder] ?? []
         lines.push(`${folder}：${list.length ? `${list.length} 个` : '（空）'}`)
         for (const file of list.slice(0, 40)) {
           if (folder !== 'loras') {
-            lines.push(`  - ${file}`)
+            const labels = labelModel(file)
+            const tag = labels.length ? `  [${labels.join(' / ')}]` : ''
+            lines.push(`  - ${file}${tag}`)
             continue
           }
           const table = loraAliases(file, aliasDocs)
@@ -2790,6 +2813,18 @@ export function apply(ctx, config) {
         }
         if (list.length > 40) lines.push(`  …还有 ${list.length - 40} 个`)
       }
+      if (slimNodes.length > 0) {
+        const caps = findCapabilities('参考图 编辑 抠图 去遮挡 放大 生图', slimNodes, index)
+        if (caps.length > 0) {
+          lines.push('', '本机能力线索（按用途反查，详情用 comfy_capabilities）：')
+          for (const cap of caps.slice(0, 6)) {
+            const nodeNames = cap.nodes.slice(0, 3).map((n) => n.name).join('、')
+            lines.push(`  - ${cap.label}：${nodeNames ? `节点 ${nodeNames}` : '见模型标签'}`)
+          }
+        }
+      }
+      lines.push('', '遇到陌生的图任务（去遮挡 / 抠图 / 换背景 / 局部改）先查本机能力：'
+        + '用 comfy_capabilities 按用途反查可用模型与节点，别凭世界知识直接上 Python/PIL/rembg/GrabCut。')
       const missing = ['diffusion_models', 'text_encoders', 'vae'].filter((f) => (index[f] ?? []).length === 0)
       const hasCheckpoint = (index.checkpoints ?? []).length > 0
       if (hasCheckpoint) {
@@ -2805,13 +2840,78 @@ export function apply(ctx, config) {
     },
   })
 
-  // ── 3. comfy_node ──────────────────────────────────────────────────────
+  // ── 3. comfy_capabilities ──────────────────────────────────────────────
+  registerComfyTool({
+    name: 'comfy_capabilities',
+    description:
+      '按任务用途反查本机 ComfyUI 的能力：给它一句任务描述（如「去掉截图里的遮挡只留人物」「抠图」「换背景」「局部重绘」），'
+      + '返回本机真实存在的相关模型文件与节点类名、一句用途提示和关键输入。'
+      + '遇到陌生的图编辑任务先查这个 —— 优先用本机原生模型/节点，别凭世界知识直接上 Python/PIL/rembg/GrabCut。'
+      + '真值来自本机 object_info 与模型文件名；多个候选会全列，不替你选。',
+    parameters: params({
+      task: s('任务描述或用途关键词，中英文都行，如 "去掉遮挡只留人物" / "抠图" / "upscale" / "reference edit"'),
+    }, ['task']),
+    output: output(),
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      if (typeof args.task !== 'string' || args.task.trim().length === 0) {
+        throw new Error('必须给 task（任务描述或关键词）。')
+      }
+      const task = args.task.trim()
+
+      // 模型清单：离线直接交给 registerComfyTool 的统一文案处理
+      let index
+      try {
+        index = await client.modelIndex({ signal: exec.signal })
+      } catch (error) {
+        if (error instanceof ComfyError && error.code === 'OFFLINE') throw error
+        throw new Error(explain(error))
+      }
+
+      // object_info：拉不到就降级为「静态词典 + 文件名」，照样给出经验候选
+      let slimNodes = []
+      let note = ''
+      try {
+        slimNodes = await getSlimNodes(exec.signal)
+      } catch (error) {
+        if (error instanceof ComfyError && error.code === 'OFFLINE') throw error
+        note = '（本机 object_info 暂时拿不到，下面的节点候选来自内置词典，未连本机验证；用 comfy_node 深查时以本机为准）'
+      }
+
+      const caps = findCapabilities(task, slimNodes, index)
+      const lines = [`按「${task}」反查本机能力：${note}`]
+      if (caps.length === 0) {
+        lines.push('', '本机没找到明确匹配的模型或节点。可以：')
+        lines.push('  - 用 comfy_models 看完整模型清单，找名字像的')
+        lines.push('  - 用 comfy_node 传关键词（如 qwen / inpaint / rmbg）列相关节点')
+        lines.push('  - 仍没有合适的，再考虑通用图像工具')
+        return { text: lines.join('\n') }
+      }
+
+      for (const cap of caps) {
+        lines.push('', `■ ${cap.label}${cap.match === 'task' ? '' : '（弱相关：本机有这个能力，但任务词没直接命中）'}`)
+        if (cap.models.length > 0) lines.push(`  模型：${cap.models.join('、')}`)
+        if (cap.nodes.length > 0) {
+          lines.push(`  节点：${cap.nodes.map((n) => n.name).join('、')}`)
+          const withInputs = cap.nodes.filter((n) => n.requiredInputs.length > 0).slice(0, 2)
+          for (const node of withInputs) lines.push(`    ${node.name} 关键输入：${node.requiredInputs.join(', ')}`)
+        }
+        lines.push(`  提示：${cap.hint}`)
+      }
+      if (caps.length > 1) lines.push('', `共 ${caps.length} 个候选能力，按相关度排；按你的实际目标挑一个，别叠着用。`)
+      lines.push('', '确定节点后用 comfy_node 查完整输入，再走 comfy_run 的 graph 模式搭工作流。')
+      return { text: lines.join('\n') }
+    },
+  })
+
+  // ── 4. comfy_node ──────────────────────────────────────────────────────
   registerComfyTool({
     name: 'comfy_node',
     description:
       '查一个 ComfyUI 节点类接受哪些输入、默认值和取值范围、有哪些枚举值。'
-      + '自己搭工作流（comfy_run 的 graph 模式）之前用它确认参数名和连线口。',
-    parameters: params({ node_class: s('节点类名，例如 KSampler、CLIPTextEncode、SaveImage') }, ['node_class']),
+      + '自己搭工作流（comfy_run 的 graph 模式）之前用它确认参数名和连线口。'
+      + '不知道完整类名时传关键词（如 qwen、inpaint、rmbg）列候选，再用完整类名深查。',
+    parameters: params({ node_class: s('节点类名，例如 KSampler、CLIPTextEncode、SaveImage；也可传关键词列候选') }, ['node_class']),
     output: output(),
     isConcurrencySafe: () => true,
     async execute(args, exec) {
@@ -2820,11 +2920,29 @@ export function apply(ctx, config) {
         info = await client.nodeInfo(args.node_class, { signal: exec.signal })
       } catch (error) {
         if (error instanceof ComfyError && error.code === 'OFFLINE') throw error
-        throw new Error(explain(error))
+        // 404 = 没有这个节点类；当成关键词走候选搜索，而不是直接报错
+        if (error instanceof ComfyError && error.status === 404) info = null
+        else throw new Error(explain(error))
       }
       if (!info) {
+        // 完整类名查不到 → 当作关键词，从 object_info 里列候选，打破「不知道类名就无从下手」的鸡生蛋
+        let slimNodes = []
+        try {
+          slimNodes = await getSlimNodes(exec.signal)
+        } catch (error) {
+          if (error instanceof ComfyError && error.code === 'OFFLINE') throw error
+        }
+        const { candidates } = searchNodes(args.node_class, slimNodes)
+        if (candidates.length > 0) {
+          const lines = [`没有叫 "${args.node_class}" 的节点类。按关键词找到 ${candidates.length} 个候选：`]
+          for (const node of candidates) {
+            lines.push(`  - ${node.name}${node.display_name ? `（${node.display_name}）` : ''}${node.category ? ` — ${node.category}` : ''}`)
+          }
+          lines.push('用上面的完整类名再查一次即可看到输入/输出细节。')
+          return { text: lines.join('\n') }
+        }
         throw new Error(
-          `没有叫 "${args.node_class}" 的节点类。常见的有：UNETLoader、CLIPLoader、VAELoader、`
+          `没有叫 "${args.node_class}" 的节点类，按关键词也没找到候选。常见的有：UNETLoader、CLIPLoader、VAELoader、`
           + 'CheckpointLoaderSimple、CLIPTextEncode、EmptySD3LatentImage、KSampler、VAEDecode、SaveImage、PreviewImage。',
         )
       }
@@ -2872,7 +2990,7 @@ export function apply(ctx, config) {
     },
   })
 
-  // ── 4. comfy_run ───────────────────────────────────────────────────────
+  // ── 5. comfy_run ───────────────────────────────────────────────────────
   registerComfyTool({
     name: 'comfy_run',
     description:
@@ -4255,6 +4373,12 @@ export function apply(ctx, config) {
               '# ComfyUI',
               `本机 ComfyUI 在 ${where()}。出图流程：comfy_run 提交（拿 prompt_id）→ comfy_result 等它跑完并取图。`,
               '文生图直接用 comfy_run 的 template 模式写 prompt；要更复杂的图先 comfy_node 查节点再走 graph 模式。',
+              '遇到陌生的图编辑任务（去遮挡 / 去物体 / 抠图 / 换背景 / 局部改 / 风格化）：'
+                + '先用 comfy_capabilities 按任务描述反查本机有没有专门的模型和节点，优先用原生节点；'
+                + '用 comfy_node 可以传关键词（如 qwen / inpaint / rmbg）列候选节点。'
+                + '不要凭世界知识猜该用哪个模型，也不要直接上 Python/PIL/rembg/GrabCut 硬做 —— 本机往往已有现成能力。',
+              '参考图指令编辑：qwen_image 系列配 TextEncodeQwenImage21 这类节点，把图作为参考图送进去、'
+                + '用提示词说要改什么，graph 模式直出；这类任务不必先算蒙版或抠图。',
               '「绘图模式」的会话里，输入框左侧有绘图控件：默认生图模型与 LoRA 开关都在那里选，' +
                 '模型列表分两组 —— 扩散模型（diffusion_models，三件套加载器）和整合包（checkpoints，' +
                 '一个文件就带 MODEL/CLIP/VAE）。' +
