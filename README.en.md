@@ -1,6 +1,6 @@
 # dsh-comfyui-link
 
-[![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
+[![CI](https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--rc.1-blueviolet.svg)](https://github.com/deepseek-ai/deepseek-harness)
@@ -40,7 +40,7 @@ Ten tools become available to the model:
 | `comfy_status` | Is the server alive, how much VRAM is free, what's queued, how the recent jobs went |
 | `comfy_models` | Which model files exist (`diffusion_models` / `text_encoders` / `vae` / `checkpoints` / `loras`). It opens with the **current draw config** (which image model is in use, whether LoRA may be attached, whether a prompt-doc folder is configured), and each LoRA line carries the **character aliases** recognised from the doc next to it |
 | `comfy_node` | Inspect a node class: accepted inputs, defaults, ranges, enum values |
-| `comfy_run` | Submit a job — `mode="template"` txt2img (optionally with a LoRA), `mode="img2img"`, or `mode="graph"` with your own API-format workflow. `lora: "auto"` picks one by the character name in `prompt` |
+| `comfy_run` | Submit a job — `mode="template"` txt2img (optionally with a LoRA), `mode="img2img"`, or `mode="graph"` with your own API-format workflow. `lora: "auto"` picks one by the character name in `prompt`. Three-piece models auto-match their text encoder / VAE and `clipType` by family; override explicitly with `clipType` / `clip` / `vae` when needed |
 | `comfy_result` | Wait for the job, fetch the output images, actually show them to the model, report on-disk paths, optionally `save_to` |
 | `comfy_control` | Cancel a job / interrupt the running one / clear the queue / free VRAM |
 | `comfy_review` | **Review-and-redraw**: let the designated model judge the image and re-render from its suggested prompt until it's satisfied or the attempt limit is hit. Pass `reference_prompt_id` to check character fidelity, and `save_to` to keep a copy |
@@ -133,6 +133,7 @@ The preset declaration ships inside the plugin's own `cordis.patch.yml`, so inst
 - A working ComfyUI (looked for at `http://127.0.0.1:8188` by default)
 - DSH `>= 0.2.0-rc.1`, Node `>= 22`
 - The built-in txt2img template has two loading paths: a name from `diffusion_models` goes through `UNETLoader + CLIPLoader + VAELoader` (so `models/text_encoders` and `models/vae` need at least one file each), while a name from `checkpoints` goes through `CheckpointLoaderSimple`, where one all-in-one file is enough (Illustrious / 光辉 style SDXL checkpoints). An empty `diffusion_models` is fine as long as `checkpoints` has something.
+- Three-piece models **auto-match by family**: the model filename is inspected for flux / sd3 / sdxl / sd15 / hunyuan / cascade, and the matching CLIP (`clip_l` / `t5xxl` / `clip_g` …), VAE and `CLIPLoader.type` are selected. Priority: explicit `clipType` / `clip` / `vae` on `comfy_run` (or the draw-mode config) > family inference > first file in the folder. An unknown family or Flux/SD3 needing multiple text encoders produces a "搭配提醒" note in the result. `mode="graph"` with your own workflow is unaffected.
 
 ## Install
 
@@ -145,13 +146,13 @@ dsh plugin --profile web add dsh-comfyui-link
 To follow the latest code, install from GitHub:
 
 ```bash
-dsh plugin --profile web add github:jx70/dsh-comfyui-link
+dsh plugin --profile web add github:YOUR_GITHUB_USER/dsh-comfyui-link
 ```
 
 For local development (when you want edits to take effect immediately), install from a clone:
 
 ```bash
-git clone https://github.com/jx70/dsh-comfyui-link.git
+git clone https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link.git
 dsh plugin --profile web add link:/path/to/dsh-comfyui-link
 ```
 
@@ -306,7 +307,7 @@ What goes inside one document:
 ```markdown
 # Silver-haired character
 
-This LoRA was trained on Belle Anima v1 for SDXL.
+This LoRA was trained on a fictional base model for SDXL.
 
 ## Prompt
 

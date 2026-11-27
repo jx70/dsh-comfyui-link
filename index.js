@@ -27,6 +27,7 @@ import {
   buildImg2Img,
   buildTxt2Img,
   buildUpscale,
+  CLIP_TYPES,
   collectImages,
   createClient,
   humanDuration,
@@ -68,6 +69,9 @@ export const Config = z.object({
   draw: z.object({
     unet: z.string().default('').description('默认生图模型（diffusion_models 或 checkpoints 里的文件名）；留空用 diffusion_models 里第一个，没有就用 checkpoints 里第一个'),
     lora: z.boolean().default(false).description('允许 comfy_run / comfy_review 挂 LoRA'),
+    clipType: z.string().default('').description('CLIPLoader.type（stable_diffusion/sdxl/sd3/flux 等）；留空按生图模型系列自动推断'),
+    clip: z.string().default('').description('默认文本编码器文件名；留空按生图模型系列自动匹配'),
+    vae: z.string().default('').description('默认 VAE 文件名；留空按生图模型系列自动匹配'),
   }).volatile(),
   output: z.object({
     dir: z.string().default('').description('图片输出目录；绝对路径直接用，相对路径相对 ComfyUI 的 output；留空＝留在 ComfyUI 的 output'),
@@ -189,9 +193,10 @@ function unwrapVolatile(value) {
 /**
  * 读取当前功能开关（每次都现读 volatile 引用，热编辑即时生效）。
  * 默认：review/img2img/upscale 全关闭；draw.unet 留空（用文件夹里第一个）、draw.lora 关闭；
+ * draw.clipType/clip/vae 留空（按模型系列自动匹配）；
  * output.dir 留空（图就留在 ComfyUI 自己的 output 里，不额外复制）；
  * loraDocs.dir 留空（挂 LoRA 时不去找提示词文档），maxChars 默认 4000。
- * @returns {{review:{enabled,provider,model,maxAttempts}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean}, output:{dir:string}, loraDocs:{dir:string,maxChars:number}}}
+ * @returns {{review:{enabled,provider,model,maxAttempts}, img2img:boolean, upscale:boolean, draw:{unet:string,lora:boolean,clipType:string,clip:string,vae:string}, output:{dir:string}, loraDocs:{dir:string,maxChars:number}}}
  */
 function readFeatureConfig(config) {
   const review = unwrapVolatile(config?.review) ?? {}
@@ -210,6 +215,9 @@ function readFeatureConfig(config) {
     draw: {
       unet: typeof draw.unet === 'string' ? draw.unet : '',
       lora: draw.lora === true,
+      clipType: typeof draw.clipType === 'string' ? draw.clipType.trim() : '',
+      clip: typeof draw.clip === 'string' ? draw.clip.trim() : '',
+      vae: typeof draw.vae === 'string' ? draw.vae.trim() : '',
     },
     output: {
       dir: typeof output.dir === 'string' ? output.dir.trim() : '',
@@ -490,8 +498,8 @@ const KNOWN_EXTS = new Set([
 
 /**
  * 把 LoRA 名或文档名规范化成同一个 key，用来对齐。
- * 'Belle Anima v1.safetensors' → 'belle_anima_v1'
- * '提示词-Belle_Anima-v1.MD'   → '提示词_belle_anima_v1'
+ * 'Luna Anima v1.safetensors' → 'luna_anima_v1'
+ * '提示词-Luna_Anima-v1.MD'   → '提示词_luna_anima_v1'
  */
 export function normalizeLoraKey(name) {
   const raw = typeof name === 'string' ? name : ''
@@ -591,7 +599,7 @@ export function extractPromptSection(text, { maxChars = LORA_DOC_MAX_CHARS } = {
 // ── 从文档里挑「真正的提示词段」 ─────────────────────────────────────────
 // 现实里的提示词文档很少只有 tag：前面是模型信息表、作者原话、拆解、踩坑清单，
 // 后面才是可以照抄的 tag 块。按顺序截前 N 字，等于优先喂散文、把真正该喂的挤到门外
-// （实测：4000 字预算下 15.7% 是汉字，「可直接复制的完整 prompt」整段在门外）。
+// （实测：4000 字预算下 一成多 是汉字，「可直接复制的完整 prompt」整段在门外）。
 // 所以这里先按行判定「这一行是不是 tag 串」，把 tag 段挑出来，再在预算内拼。
 
 /** 汉字/假名：用来区分「中文叙述」与「英文 tag 串」 */
@@ -761,7 +769,7 @@ export function parsePromptBlocks(text) {
 }
 
 // ── 按「套」切文档：一套衣服一章，章与章互斥 ───────────────────────────────
-// 真实提示词文档里，一套衣服就是一章：`── ① 常服`、`▍② ROOM WEAR（部屋着）`、`一、校服（meguru_school）`。
+// 真实提示词文档里，一套衣服就是一章：`── ① 常服`、`▍② ROOM WEAR（部屋着）`、`一、校服（ruri_school）`。
 // 这些章是互斥的 —— 五套同时并进 prompt，编码器就收到互相打架的服装词（white shirt + maid + waitress
 // + china dress 全在），画出来「不知道穿什么」。所以先切组，再一次只挑一组。
 
@@ -851,7 +859,7 @@ function groupNames(head) {
     .replace(/[─\-—=【】[\]]+/gu, ' ')
     .replace(/[：:]\s*$/u, '')
     .trim()
-  // 组名可能写成一串：`belle_anima_v1, school`（触发词 + 服装名）、`常服 · 半身像`（服装 + 构图）。
+  // 组名可能写成一串：`luna_anima_v1, school`（触发词 + 服装名）、`常服 · 半身像`（服装 + 构图）。
   // 逗号 / 中点是分隔，空格不是（`SCHOOL UNIFORM`、`school uniform` 是一个词）。
   for (const piece of main.split(/\s*[·,，]\s*/u)) if (piece.trim()) names.push(piece.trim())
   for (const group of parens) {
@@ -871,7 +879,7 @@ function lineOutfitLabel(line) {
   return match[1]
 }
 
-/** 软标题：`Base outfit` / `Summer Skies` / `belle_anima_v1, school` —— 短、无标点、下一行就是 tag（铃那种文档全靠这条） */
+/** 软标题：`Base outfit` / `Summer Skies` / `luna_anima_v1, school` —— 短、无标点、下一行就是 tag（露娜那种文档全靠这条） */
 function softGroupHead(line, next) {
   const t = typeof line === 'string' ? line.trim() : ''
   if (t.length < 2 || t.length > 40) return false
@@ -879,7 +887,7 @@ function softGroupHead(line, next) {
   if (/\S {2,}\S/u.test(t)) return false
   if (tagishLine(t)) return false
   if (!tagishLine(next)) return false
-  // 「触发词, 服装名」两段式软标题（belle_anima_v1, school）：两段都必须是单个词、不含空格。
+  // 「触发词, 服装名」两段式软标题（luna_anima_v1, school）：两段都必须是单个词、不含空格。
   // `brown hair, green eyes` 两段都含空格，是 tag 串不是标题。
   if (/[,，]/u.test(t)) {
     const parts = t.split(/[,，]/u).map((s) => s.trim()).filter(Boolean)
@@ -893,7 +901,7 @@ function softGroupHead(line, next) {
 /**
  * 把文档切成「组」：每组是一套服装（或一个角色本体/元信息章）。
  * 行级判定顺序是固定的 —— `※ 完整可用 prompt` 必须先按 full 处理再按 note 处理，
- * 否则那一整条会被当成主块并进去（绫地宁宁 ① 会从 488 字涨到 979 字）。
+ * 否则那一整条会被当成主块并进去（某个主块会异常膨胀）。
  * @returns {{groups:Array<{index:number, head:string, text:string, chars:number, neg:string,
  *   quality:boolean, meta:boolean, anchor:boolean, names:string[],
  *   units:Array<{label:string, text:string}>}>, blocks:number, dropped:number, totalChars:number}}
@@ -927,7 +935,7 @@ export function parseOutfitGroups(text) {
     blank = false
     // 装饰行（`====`、`----`、`────`）只做视觉分隔，不是标题也不是内容：
     // 不改 part/mode/current —— 否则它会把紧跟其后的正文 tag 顶成 note 丢掉
-    // （因幡巡文档就是「标题上下各夹一行 ====」，去掉这层就会丢整节）。
+    // （月见琉璃文档就是「标题上下各夹一行 ====」，去掉这层就会丢整节）。
     if (DECOR_LINE_RE.test(trimmed)) continue
     const head = promptHead(trimmed)
     if (head) {
@@ -1001,7 +1009,7 @@ export function parseOutfitGroups(text) {
 
 /**
  * 挑组：先认服装名（组名/别名精确命中，压过同义词），再认同义词，
- * 再认组内行标签（矢来美羽那种「一章挂五套」）；都认不出就看用户是不是在说衣服 ——
+ * 再认组内行标签（黑羽翼那种「一章挂五套」）；都认不出就看用户是不是在说衣服 ——
  * 说了但文档没有 → 只并角色本体；没说 → 拿第一组当默认。
  * 锚点组（角色本体）永远并入。预算按整组装，装不下就不装（不切半套衣服）。
  */
@@ -1053,8 +1061,8 @@ export function chooseOutfitGroups(groups, prompt, limit) {
     const text = best.unit ? best.unit.text : best.group.text
     picked = [{ ...best.group, text, chars: text.length }]
     how = best.how
-    // 命中「组内行标签」时（矢来美羽/四季夏目那种一章挂多套），报告要说清是哪一套；
-    // 命中组名时用「匹配到的那一个名字片段」——`belle_anima_v1, battle` 只说 `battle`，
+    // 命中「组内行标签」时（黑羽翼/星野梦梦那种一章挂多套），报告要说清是哪一套；
+    // 命中组名时用「匹配到的那一个名字片段」——`luna_anima_v1, battle` 只说 `battle`，
     // 触发词前缀不是服装名。
     outfit = best.unit ? best.unit.label : (best.name || best.group.head)
   } else if (OUTFIT_INTENT_RE.test(prompt)) {
@@ -1287,14 +1295,14 @@ export function composeDocSection(text, { maxChars = LORA_DOC_MAX_CHARS, prompt 
   }
 }
 
-/** 把名字切成词：'Belle Anima v1' → ['belle','anima','v1'] */
+/** 把名字切成词：'Luna Anima v1' → ['luna','anima','v1'] */
 export function nameTokens(name) {
   return normalizeLoraKey(name).split('_').filter((token) => token.length > 0)
 }
 
 // ── 角色别名：把「人说的话」对上「LoRA 文件」 ────────────────────────────────
-// LoRA 文件名可能是英文、罗马音、拼音或纯编号（natsume-000016、tenshi_amane），
-// 用户说的是中文（四季夏目）或日文（四季 ナツメ）。直接把两者对撞是对不上的，
+// LoRA 文件名可能是英文、罗马音、拼音或纯编号（yume-anima、kazami_haru），
+// 用户说的是中文（星野梦梦）或日文（星野 ゆめ）。直接把两者对撞是对不上的，
 // 但文档标题行里几乎都写着「中文（日文 / 罗马音）」—— 那就是现成的对照表。
 // 这里只从**已有证据**里取别名（文档标题、文档文件名、LoRA 文件名），不引入词典。
 
@@ -1314,8 +1322,8 @@ const DECOR_LINE_RE = /^[=\-─═#*_\s]{3,}$/
 
 /**
  * 归一化一条别名或一句提示词，用来做「包含」判断。
- * 全角转半角、小写、去掉所有分隔符 —— 'Shiki Natsume' 与 'shiki_natsume' 都变成
- * 'shikinatsume'，这样空格/下划线/中点的写法差异不会影响匹配。
+ * 全角转半角、小写、去掉所有分隔符 —— 'Hoshino Yume' 与 'hoshino_yume' 都变成
+ * 'hoshinoyume'，这样空格/下划线/中点的写法差异不会影响匹配。
  */
 export function normalizeAlias(text) {
   const raw = typeof text === 'string' ? text : ''
@@ -1346,7 +1354,7 @@ function aliasFromPiece(piece, out) {
 
 /**
  * 从文档开头几行里读「角色别名」。
- * 实测的长文档第 2 行几乎都是 `四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单`
+ * 实测的长文档第 2 行几乎都是 `星野梦梦（星野 ゆめ / Hoshino Yume）Anima LoRA 提示词清单`
  * 这种写法 —— 括号外是中文，括号里是日文与罗马音（繁简两种中文也常并排出现）。
  *
  * @returns {{line:string, aliases:string[]}}
@@ -1359,7 +1367,7 @@ export function docAliases(text) {
   const out = []
   const scan = lines.slice(0, 12)
   // 只认「第一行非装饰行」，或者退一步认第一个 Markdown 标题。
-  // 不能一路往下找短行：`绝区零 铃.txt` 是「一行英文说明 + 小节名 Base outfit」的结构，
+  // 不能一路往下找短行：`幻想计划 露娜.txt` 是「一行英文说明 + 小节名 Base outfit」的结构，
   // 把 `Base outfit` / `outfit` 当别名会让「summer outfit」这种 prompt 误命中角色 LoRA。
   const first = scan.find((line) => !DECOR_LINE_RE.test(line)) ?? ''
   const heading = scan.find((line) => /^#{1,6}\s+\S/u.test(line)) ?? ''
@@ -1376,7 +1384,7 @@ export function docAliases(text) {
     if (line.length > 60) continue
     if (/[。！？!?]$/.test(line)) continue
     if (/^(?:use|add|note|tips?)\b/i.test(line)) continue
-    // 纯 ASCII 的短行分为「名字」（全小写 tsuyuri kanao / deepseek）与「小节名」
+    // 纯 ASCII 的短行分为「名字」（全小写 kanzaki sakura / deepseek）与「小节名」
     //（Base outfit / Summer Skies 这种给服装命名的小标题）—— 只收前者，别把小节名当角色
     const words = line.split(/\s+/).filter(Boolean)
     const asciiOnly = !/[\u3400-\u9FFF\u3040-\u30FF]/.test(line)
@@ -1404,10 +1412,10 @@ function dedupeAliases(list) {
 
 /**
  * 一个 LoRA 文件都有哪些叫法。三个来源，按可靠性排序：
- *   1. 文件名自身的词（tenshi_amane → tenshi / amane）
- *   2. **同一个文件夹里**那篇文档的标题别名（natsume-000016.safetensors 与
- *      `四季夏目_Anima_LoRA_提示词清单.txt` 并排摆放 → 中文/日文/罗马音全拿到）
- *   3. 文档文件名本身（`栗花落香奈乎.txt`、`绝区零 铃.txt`）
+ *   1. 文件名自身的词（kazami_haru → kazami / haru）
+ *   2. **同一个文件夹里**那篇文档的标题别名（yume-anima.safetensors 与
+ *      `星野梦梦_Anima_LoRA_提示词清单.txt` 并排摆放 → 中文/日文/罗马音全拿到）
+ *   3. 文档文件名本身（`神崎樱.txt`、`幻想计划 露娜.txt`）
  *
  * @param {string} file LoRA 文件名
  * @param {Array<{stem:string, raw:string, siblings?:string[]}>} docs 同目录下的文档
@@ -1565,7 +1573,7 @@ export function scoreDocForLora(doc, text, loraName, options = {}) {
     ? doc.key
     : normalizeLoraKey(doc?.stem ?? doc?.name ?? '')
   const stemTokens = stemKey.split('_').filter((token) => token.length > 0)
-  // 子目录名也算文件名信号的一部分：`belle_anima_v1/角色.md` 与 `belle_anima_v1.md` 同等对待
+  // 子目录名也算文件名信号的一部分：`luna_anima_v1/角色.md` 与 `luna_anima_v1.md` 同等对待
   const relKey = typeof doc?.rel === 'string' && doc.rel.length > 0
     ? normalizeLoraKey(doc.rel.replace(/\.[A-Za-z0-9]{1,8}$/, '').replace(/[\\/]/g, ' '))
     : stemKey
@@ -1600,7 +1608,7 @@ export function scoreDocForLora(doc, text, loraName, options = {}) {
         reasons.push(`文件名命中 ${hit}/${loraTokens.length} 个词`)
       }
     }
-    // ② 正文：把空格/下划线/连字符抹平后找 LoRA 名（"Belle Anima v1" 也能命中）
+    // ② 正文：把空格/下划线/连字符抹平后找 LoRA 名（"Luna Anima v1" 也能命中）
     const flat = raw.toLowerCase().replace(/[\s_\-]+/g, '_')
     if (flat.includes(loraKey)) {
       score += 30
@@ -2888,8 +2896,9 @@ export function apply(ctx, config) {
       sampler: s('采样器，默认 euler；可选值查 comfy_node KSampler'),
       scheduler: s('调度器，默认 simple；可选值查 comfy_node KSampler'),
       unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包。注意：对话栏左侧选中的模型优先，这里传的 unet 只在那边选的是「自动」时才生效；想临时换模型请让用户在对话栏里改'),
-      clip: s('文本编码器文件名，省略用 text_encoders 里第一个'),
-      vae: s('VAE 文件名，省略用 vae 里第一个'),
+      clip: s('文本编码器文件名，省略按生图模型系列自动匹配（匹配不到才用 text_encoders 里第一个）'),
+      vae: s('VAE 文件名，省略按生图模型系列自动匹配（匹配不到才用 vae 里第一个）'),
+      clipType: s('CLIPLoader.type（stable_diffusion/sdxl/sd3/flux 等），省略按生图模型系列自动推断；合法值取自本机 /object_info/CLIPLoader'),
       lora: s('LoRA 文件名（template 模式）。要先在对话栏左侧把 LoRA 开关打开；文件名用 comfy_models 查 loras 文件夹。'
         + '画具体角色但不知道挂哪个，就传 "auto" —— 插件按 prompt 里的角色名去对 loras 名单（中文 / 日文 / 罗马音都认），'
         + '唯一命中才挂；认不出或认出多个都会在结果里说明，不会瞎挂'),
@@ -2914,6 +2923,8 @@ export function apply(ctx, config) {
       let injectedNode = null
       // 挂 LoRA 时提示词文档的结论，最后拼进结果文本（没查就留空）
       let loraDocNote = ''
+      // 解析出的模型搭配（含 warnings），在结果文本里交代搭配提醒；graph 模式为 null
+      let models = null
 
       if (mode === 'graph') {
         if (!args.graph) throw new Error('mode="graph" 时必须给 graph（API 格式的节点表）')
@@ -3024,10 +3035,19 @@ export function apply(ctx, config) {
         }
 
         const index = await client.modelIndex({ signal })
-        const models = resolveModels(index, {
+        // CLIPLoader.type 的合法值取自本机 object_info；拿不到就用兜底清单，不阻塞出图
+        let allowedClipTypes = CLIP_TYPES
+        try {
+          const info = await client.nodeInfo('CLIPLoader', { signal })
+          const raw = info?.input?.required?.type?.[0]
+          if (Array.isArray(raw) && raw.length > 0) allowedClipTypes = raw
+        } catch { /* 接口不可用就用兜底 */ }
+        models = resolveModels(index, {
           unet: preferModel(features.draw.unet, args.unet),
-          clip: args.clip,
-          vae: args.vae,
+          clip: args.clip || features.draw.clip || undefined,
+          vae: args.vae || features.draw.vae || undefined,
+          clipType: args.clipType || features.draw.clipType || undefined,
+          allowedClipTypes,
         })
 
         if (mode === 'img2img') {
@@ -3090,8 +3110,10 @@ export function apply(ctx, config) {
         if (head.ckpt_name) {
           lines.push(`模型：${head.ckpt_name}（整合包，MODEL/CLIP/VAE 都从它出）`)
         } else {
-          lines.push(`模型：${head.unet_name} + ${graph[2]?.inputs?.clip_name} + ${graph[3]?.inputs?.vae_name}`)
+          lines.push(`模型：${head.unet_name} + ${graph[2]?.inputs?.clip_name} + ${graph[3]?.inputs?.vae_name}`
+            + ` · CLIPLoader.type=${graph[2]?.inputs?.type ?? 'stable_diffusion'}`)
         }
+        for (const warning of models?.warnings ?? []) lines.push(`搭配提醒：${warning}`)
         const isCkpt = Boolean(head.ckpt_name)
         const samplerNode = (isCkpt
           ? (mode === 'img2img' ? graph[6] : graph[5])
@@ -3422,6 +3444,7 @@ export function apply(ctx, config) {
         }
       }
       const reviewLog = []
+      const modelWarnings = []
 
       let satisfied = false
       let round = 0
@@ -3452,7 +3475,22 @@ export function apply(ctx, config) {
         // 重画时也把 LoRA 文档的提示词段带上，否则第二轮就丢了角色设定
         const drawPrompt = composeLoraPrompt(newPrompt, loraDocPrompt)
         const index = await client.modelIndex({ signal })
-        const models = resolveModels(index, { unet: features.draw.unet || undefined })
+        let allowedClipTypes = CLIP_TYPES
+        try {
+          const info = await client.nodeInfo('CLIPLoader', { signal })
+          const raw = info?.input?.required?.type?.[0]
+          if (Array.isArray(raw) && raw.length > 0) allowedClipTypes = raw
+        } catch { /* 接口不可用就用兜底 */ }
+        const models = resolveModels(index, {
+          unet: features.draw.unet || undefined,
+          clip: features.draw.clip || undefined,
+          vae: features.draw.vae || undefined,
+          clipType: features.draw.clipType || undefined,
+          allowedClipTypes,
+        })
+        for (const warning of models?.warnings ?? []) {
+          if (!modelWarnings.includes(warning)) modelWarnings.push(warning)
+        }
         const graph = buildTxt2Img({
           ...models,
           prompt: drawPrompt,
@@ -3477,6 +3515,7 @@ export function apply(ctx, config) {
         `结论：${satisfied ? '满意' : '仍未满意'}`,
       ]
       if (referenceRef) lines.push('已附角色参考图，审图时一并比对角色还原度。')
+      for (const warning of modelWarnings) lines.push(`搭配提醒：${warning}`)
       if (loraDocNote) lines.push(loraDocNote)
       lines.push('')
       for (const item of reviewLog) {
@@ -3562,7 +3601,7 @@ export function apply(ctx, config) {
       + '这个工具是用来「先看一眼」或者看全文的。'
       + '文档超过字数预算时默认只并入收口后的那几段，余下的部分用 rest: true 看、整篇用 full: true 看。',
     parameters: params({
-      lora: s('LoRA 文件名（如 belle_anima_v1.safetensors）。省略则列出目录里的候选文档'),
+      lora: s('LoRA 文件名（如 luna_anima_v1.safetensors）。省略则列出目录里的候选文档'),
       prompt: s('你打算用的正面提示词。给了就按「贴题程度」预演一遍挑段结果，跟 comfy_run 实际并进去的一致；不给就按原文顺序挑'),
       full: { type: 'boolean', description: 'true 时返回挑中那篇的全文（不截断），默认只给提示词段' },
       rest: { type: 'boolean', description: 'true 时返回「超过字数预算、没并进 prompt」的那部分原文（full 优先）' },

@@ -12,8 +12,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   ComfyError, MODEL_FOLDERS, buildImg2Img, buildTxt2Img, buildUpscale,
-  collectImages, createClient, humanDuration, injectPrompt, normalizeGraph,
-  resolveModels, summarizeGraph,
+  collectImages, createClient, humanDuration, inferModelFamily, injectPrompt, normalizeGraph,
+  pickCompatible, resolveModels, summarizeGraph,
 } from '../lib/comfy.mjs'
 import { preferModel } from '../index.js'
 
@@ -210,7 +210,14 @@ test('collectImages 摊平历史记录里的输出图', () => {
 
 test('resolveModels 不点名就用文件夹里第一个', () => {
   const index = { diffusion_models: ['d1', 'd2'], text_encoders: ['t1'], vae: ['v1'] }
-  assert.deepEqual(resolveModels(index), { unet: 'd1', clip: 't1', vae: 'v1' })
+  // d1 认不出系列 → family unknown、clipType stable_diffusion、带一条 warning
+  const got = resolveModels(index)
+  assert.equal(got.unet, 'd1')
+  assert.equal(got.clip, 't1')
+  assert.equal(got.vae, 'v1')
+  assert.equal(got.clipType, 'stable_diffusion')
+  assert.equal(got.family, 'unknown')
+  assert.equal(got.warnings.length, 1)
 })
 
 test('resolveModels 认得 checkpoints 里的整合包，一个名字就够了', () => {
@@ -222,18 +229,80 @@ test('resolveModels 认得 checkpoints 里的整合包，一个名字就够了',
   }
   // 点整合包的名字 → 走 CheckpointLoaderSimple，不再需要 clip/vae
   assert.deepEqual(resolveModels(index, { unet: 'Illustrious-XL-v2.0.safetensors' }), {
-    checkpoint: 'Illustrious-XL-v2.0.safetensors',
+    checkpoint: 'Illustrious-XL-v2.0.safetensors', warnings: [],
   })
   // 点三件套的名字 → 还是三件套
-  assert.deepEqual(resolveModels(index, { unet: 'd1' }), { unet: 'd1', clip: 't1', vae: 'v1' })
+  assert.equal(resolveModels(index, { unet: 'd1' }).unet, 'd1')
   // 不点名时 diffusion_models 优先
-  assert.deepEqual(resolveModels(index), { unet: 'd1', clip: 't1', vae: 'v1' })
+  assert.equal(resolveModels(index).unet, 'd1')
 })
 
 test('resolveModels 只有 checkpoints 时退回整合包，不再要求 text_encoders / vae', () => {
   const index = { diffusion_models: [], checkpoints: ['ck1.safetensors'], text_encoders: [], vae: [] }
-  assert.deepEqual(resolveModels(index), { checkpoint: 'ck1.safetensors' })
-  assert.deepEqual(resolveModels(index, { unet: 'ck1.safetensors' }), { checkpoint: 'ck1.safetensors' })
+  assert.deepEqual(resolveModels(index), { checkpoint: 'ck1.safetensors', warnings: [] })
+  assert.deepEqual(resolveModels(index, { unet: 'ck1.safetensors' }), { checkpoint: 'ck1.safetensors', warnings: [] })
+})
+
+test('inferModelFamily：按文件名认出 flux / sd3 / sdxl / sd15 / hunyuan / cascade', () => {
+  assert.equal(inferModelFamily('flux1-dev.safetensors'), 'flux')
+  assert.equal(inferModelFamily('sd3.5_large.safetensors'), 'sd3')
+  assert.equal(inferModelFamily('Illustrious-XL-v2.0.safetensors'), 'sdxl')
+  assert.equal(inferModelFamily('v1-5-pruned-emaonly.ckpt'), 'sd15')
+  assert.equal(inferModelFamily('hunyuan_video_t2v.safetensors'), 'hunyuan')
+  assert.equal(inferModelFamily('stable_cascade_b.safetensors'), 'cascade')
+  assert.equal(inferModelFamily('random_name'), 'unknown')
+})
+
+test('pickCompatible：三件套按模型系列挑编码器/VAE/CLIPLoader.type', () => {
+  const index = {
+    text_encoders: ['clip_l.safetensors', 't5xxl_fp16.safetensors', 'clip_g.safetensors'],
+    vae: ['vae-ft-mse.safetensors', 'sdxl_vae.safetensors'],
+  }
+  // SDXL 模型 → type sdxl、编码器 clip_l、VAE sdxl_vae
+  const sdxl = pickCompatible(index, 'Illustrious-XL-v2.0.safetensors')
+  assert.equal(sdxl.clipType, 'sdxl')
+  assert.equal(sdxl.clip, 'clip_l.safetensors')
+  assert.equal(sdxl.vae, 'sdxl_vae.safetensors')
+  assert.equal(sdxl.family, 'sdxl')
+  assert.equal(sdxl.warnings.length, 0)
+  // SD3 → type sd3、编码器优先 t5xxl、双/三编码器 warning
+  const sd3 = pickCompatible(index, 'sd3.5_large.safetensors')
+  assert.equal(sd3.clipType, 'sd3')
+  assert.equal(sd3.clip, 't5xxl_fp16.safetensors')
+  assert.ok(sd3.warnings.some((w) => /三编码器/.test(w)))
+  // Flux → type flux、编码器 t5xxl、双编码器 warning
+  const flux = pickCompatible(index, 'flux1-dev.safetensors')
+  assert.equal(flux.clipType, 'flux')
+  assert.equal(flux.clip, 't5xxl_fp16.safetensors')
+  assert.ok(flux.warnings.some((w) => /双编码器/.test(w)))
+})
+
+test('pickCompatible：显式 clip/vae/clipType 覆盖推断，非法 type 报错带清单', () => {
+  const index = { text_encoders: ['clip_l.safetensors', 't5xxl.safetensors'], vae: ['vae.safetensors', 'sdxl_vae.safetensors'] }
+  const got = pickCompatible(index, 'flux1-dev.safetensors', {
+    clip: 'clip_l.safetensors', vae: 'vae.safetensors', clipType: 'stable_diffusion',
+  })
+  assert.equal(got.clipType, 'stable_diffusion')
+  assert.equal(got.clip, 'clip_l.safetensors')
+  assert.equal(got.vae, 'vae.safetensors')
+  assert.throws(
+    () => pickCompatible(index, 'flux1-dev.safetensors', { clipType: 'nonsense' }),
+    (error) => error instanceof ComfyError && error.code === 'MODEL' && /flux/.test(error.message),
+  )
+  // allowedClipTypes 来自 /object_info 时按它校验
+  assert.throws(
+    () => pickCompatible(index, 'flux1-dev.safetensors', {}, ['stable_diffusion', 'sdxl']),
+    (error) => error instanceof ComfyError && /stable_diffusion, sdxl/.test(error.message),
+  )
+})
+
+test('pickCompatible：没有匹配关键词时退回文件夹第一个并给 warning', () => {
+  const index = { text_encoders: ['generic_clip.safetensors'], vae: ['generic_vae.safetensors'] }
+  const got = pickCompatible(index, 'sdxl_custom.safetensors')
+  assert.equal(got.clipType, 'sdxl')
+  assert.equal(got.clip, 'generic_clip.safetensors')
+  assert.equal(got.vae, 'generic_vae.safetensors')
+  assert.ok(got.warnings.some((w) => /文本编码器/.test(w)))
 })
 
 test('resolveModels 点名了就必须存在，否则把可选清单报出来', () => {

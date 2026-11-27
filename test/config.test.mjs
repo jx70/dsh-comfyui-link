@@ -58,7 +58,7 @@ test('Config 给全套默认值：指向本机 8188，三个开关全关、绘�
   })
   assert.deepEqual(unwrap(value.img2img), { enabled: false })
   assert.deepEqual(unwrap(value.upscale), { enabled: false })
-  assert.deepEqual(unwrap(value.draw), { unet: '', lora: false })
+  assert.deepEqual(unwrap(value.draw), { unet: '', lora: false, clipType: '', clip: '', vae: '' })
   // 输出目录默认空：图就留在 ComfyUI 自己的 output 里，不额外复制
   assert.deepEqual(unwrap(value.output), { dir: '' })
   // LoRA 提示词目录默认空：一个文档都不读（不选路径就完全不参考提示词）
@@ -92,7 +92,7 @@ test('Config 接受自定义 baseUrl、设置页三个开关与绘图选项', ()
   assert.equal(review.maxAttempts, 3)
   assert.equal(unwrap(value.img2img).enabled, true)
   assert.equal(unwrap(value.upscale).enabled, true)
-  assert.deepEqual(unwrap(value.draw), { unet: 'some-model.safetensors', lora: true })
+  assert.deepEqual(unwrap(value.draw), { unet: 'some-model.safetensors', lora: true, clipType: '', clip: '', vae: '' })
   assert.deepEqual(unwrap(value.output), { dir: '/srv/pics' })
   assert.deepEqual(unwrap(value.loraDocs), { dir: '/srv/lora-docs', maxChars: 6000 })
 })
@@ -101,7 +101,7 @@ test('profile 里残留的旧 lora 段被原样透传但不参与功能（schema
   // schemastery 对未知键是透传而不是丢弃，所以这里断言的是「插件不再读它」：
   // draw 段仍是默认值，说明旧的 lora.enabled 不会偷偷把 LoRA 打开。
   const value = Config({ lora: { enabled: true } })
-  assert.deepEqual(unwrap(value.draw), { unet: '', lora: false })
+  assert.deepEqual(unwrap(value.draw), { unet: '', lora: false, clipType: '', clip: '', vae: '' })
 })
 
 test('Config 拒绝越界的 review.maxAttempts（1–5）', () => {

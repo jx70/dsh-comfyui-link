@@ -1,6 +1,6 @@
 # dsh-comfyui-link
 
-[![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
+[![CI](https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--rc.1-blueviolet.svg)](https://github.com/deepseek-ai/deepseek-harness)
@@ -40,7 +40,7 @@
 | `comfy_status` | 服务活着没、显存还剩多少、队列里有什么、最近几个任务跑到哪了 |
 | `comfy_models` | 有哪些模型文件可用（diffusion_models / text_encoders / vae / checkpoints / loras）。开头先报**当前绘图配置**（现在用的是哪个生图模型、LoRA 允不允许挂、提示词目录配了没有），loras 每行还会附上从同目录文档认出来的**角色别名** |
 | `comfy_node` | 查某个节点类接受哪些输入、默认值、取值范围、枚举值 |
-| `comfy_run` | 提交任务：`mode="template"` 文生图（可挂 LoRA）、`mode="img2img"` 图生图、`mode="graph"` 传自己的 API 格式工作流。`lora: "auto"` 会按 `prompt` 里的角色名挑一个 |
+| `comfy_run` | 提交任务：`mode="template"` 文生图（可挂 LoRA）、`mode="img2img"` 图生图、`mode="graph"` 传自己的 API 格式工作流。`lora: "auto"` 会按 `prompt` 里的角色名挑一个。三件套模型会自动按系列配对文本编码器/VAE 与 `clipType`；需要时用 `clipType` / `clip` / `vae` 显式覆盖 |
 | `comfy_result` | 等任务跑完并取回输出图，图会真的交给模型看，同时报磁盘路径，也能 `save_to` 另存 |
 | `comfy_control` | 取消任务 / 打断当前 / 清空队列 / 释放显存 |
 | `comfy_review` | **审图重生成**：让指定模型看图判断是否满意，不满自动按它的意见重画，循环到满意或达上限；给 `reference_prompt_id` 还能比对角色还原度，也能 `save_to` 另存 |
@@ -148,6 +148,7 @@
 - 一个跑得起来的 ComfyUI（默认按 `http://127.0.0.1:8188` 找）
 - DSH `>= 0.2.0-rc.1`，Node `>= 22`
 - 内置文生图模板有两种加载方式：`diffusion_models` 里有点名的模型就走 `UNETLoader + CLIPLoader + VAELoader` 三件套（那时 `models/text_encoders`、`models/vae` 至少各要有一个文件）；名字落在 `checkpoints` 里就走 `CheckpointLoaderSimple`，一个整合包文件就够（Illustrious / 光辉 这类 SDXL 检查点）。`diffusion_models` 空着也能只靠 `checkpoints` 跑。
+- 三件套会**按模型系列自动搭配**文本编码器与 VAE：从模型文件名认出 flux / sd3 / sdxl / sd15 / hunyuan / cascade，据此挑对应 CLIP（`clip_l` / `t5xxl` / `clip_g` …）、VAE 和 `CLIPLoader.type`。优先级：`comfy_run` 的 `clipType` / `clip` / `vae`（或绘图模式配置）显式指定 > 系列推断 > 文件夹第一个兜底。认不出系列或 Flux/SD3 需要多编码器时，结果里会有「搭配提醒」。`mode="graph"` 传自己的工作流不受影响。
 
 ## 安装
 
@@ -160,13 +161,13 @@ dsh plugin --profile web add dsh-comfyui-link
 想跟最新代码，从 GitHub 装：
 
 ```bash
-dsh plugin --profile web add github:jx70/dsh-comfyui-link
+dsh plugin --profile web add github:YOUR_GITHUB_USER/dsh-comfyui-link
 ```
 
 本地开发（改了代码要立刻看到效果）用 clone 下来的目录：
 
 ```bash
-git clone https://github.com/jx70/dsh-comfyui-link.git
+git clone https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link.git
 dsh plugin --profile web add link:/path/to/dsh-comfyui-link
 ```
 
@@ -319,7 +320,7 @@ DSH 设置 → ComfyUI 桥。改动先在本地攒成草稿（顶部会提示「
 ```markdown
 # 银发角色
 
-这套 LoRA 是 Belle Anima v1 训的，用在 SDXL 上。
+这套 LoRA 是 Luna Anima v1 训的，用在 SDXL 上。
 
 ## 提示词
 
@@ -330,7 +331,7 @@ masterpiece, 1girl, silver long hair, red eyes, black dress
 
 **并进 prompt 的只有 tag 段，而且一次只并一套服装。** 插件把正文按空行切块、再逐行判定：一行是不是「逗号/顿号/分号分隔、段够多、几乎全是英文短串、不以句号收尾、不是中文叙述、不是表格、不带全角括号」的 tag 串。命中的行才进 `prompt`；其余（`【一】模型信息`、作者原话、拆解、踩坑清单、参数建议、`作者备注：…`）全部跳过。这样「文档写得越啰嗦，喂进去的东西越脏」这个坑就不存在了 —— 一篇一万多字的角色清单，并进去的是纯 tag，**0 个汉字**。
 
-**挑「套」**：文档里如果是一套衣服一节（`── ① 常服` / `② 女仆` / `③ 服务员` / `④ 旗袍`，或 `① 魔女服 / ② 校服 / …`），或者是一章里靠行首中文标签挂多套（`军装 peaked cap, …` / `校服 school uniform, …`），插件会先把它们切成互斥的「套」。你 prompt 里点名的服装（中文 / 英文 tag 都认，`穿便服` → `私服` 这种同义词也认）命中哪套就只并哪套；命中组内行标签时报告会说清是哪一套（矢来美羽那种「一章挂五套」的文档）。没点名就并第一套，文档里没有就说「服装段自己写」。
+**挑「套」**：文档里如果是一套衣服一节（`── ① 常服` / `② 女仆` / `③ 服务员` / `④ 旗袍`，或 `① 魔女服 / ② 校服 / …`），或者是一章里靠行首中文标签挂多套（`军装 peaked cap, …` / `校服 school uniform, …`），插件会先把它们切成互斥的「套」。你 prompt 里点名的服装（中文 / 英文 tag 都认，`穿便服` → `私服` 这种同义词也认）命中哪套就只并哪套；命中组内行标签时报告会说清是哪一套（黑羽翼那种「一章挂五套」的文档）。没点名就并第一套，文档里没有就说「服装段自己写」。
 
 **正面 / 负面自动分流。** `负面：`、`负面额外加：`、`负面（这一套要额外压短发回流）：`、`—— 可用负面词 ——`、`negative prompt:` 这几种写法都认，它下面的 tag 段并进 `negative`（与你原来的负面词合并去重，用户写的在前）；`正面：` / `positive:` 会切回正面。章节分隔（`========`、`【五】`、`▍① …`、`## …`）会把状态复位回正面，所以「负面小节夹在正面小节中间」也不会串味。
 

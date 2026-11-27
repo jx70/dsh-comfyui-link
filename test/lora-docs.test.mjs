@@ -61,10 +61,10 @@ async function withDir(files, run) {
 
 test('normalizeLoraKey 把各种写法收敛成同一个 key', () => {
   // 扩展名、大小写、空格、下划线、连字符都不该影响对齐
-  assert.equal(normalizeLoraKey('belle_anima_v1.safetensors'), 'belle_anima_v1')
-  assert.equal(normalizeLoraKey('Belle Anima v1.safetensors'), 'belle_anima_v1')
-  assert.equal(normalizeLoraKey('belle-anima-v1'), 'belle_anima_v1')
-  assert.equal(normalizeLoraKey('  Belle__Anima--v1  '), 'belle_anima_v1')
+  assert.equal(normalizeLoraKey('luna_anima_v1.safetensors'), 'luna_anima_v1')
+  assert.equal(normalizeLoraKey('Luna Anima v1.safetensors'), 'luna_anima_v1')
+  assert.equal(normalizeLoraKey('luna-anima-v1'), 'luna_anima_v1')
+  assert.equal(normalizeLoraKey('  Luna__Anima--v1  '), 'luna_anima_v1')
   // 没有扩展名也照常
   assert.equal(normalizeLoraKey('光辉'), '光辉')
   // 非字符串一律空 key（调用方据此判定「没法对齐」）
@@ -73,8 +73,8 @@ test('normalizeLoraKey 把各种写法收敛成同一个 key', () => {
 })
 
 test('nameTokens 把名字切成词，用来算「命中几个词」', () => {
-  assert.deepEqual(nameTokens('Belle Anima v1.safetensors'), ['belle', 'anima', 'v1'])
-  assert.deepEqual(nameTokens('belle-anima-v1'), ['belle', 'anima', 'v1'])
+  assert.deepEqual(nameTokens('Luna Anima v1.safetensors'), ['luna', 'anima', 'v1'])
+  assert.deepEqual(nameTokens('luna-anima-v1'), ['luna', 'anima', 'v1'])
   assert.deepEqual(nameTokens('光辉'), ['光辉'])
   assert.deepEqual(nameTokens(''), [])
   assert.deepEqual(nameTokens(undefined), [])
@@ -99,7 +99,7 @@ test('looksLikePrompt：逗号分隔的 tag 串算提示词，成段的说明文
 })
 
 test('docTitle 取第一行非空行，去掉 markdown 井号', () => {
-  assert.equal(docTitle('# Belle Anima\n\n正文'), 'Belle Anima')
+  assert.equal(docTitle('# 示例角色\n\n正文'), '示例角色')
   assert.equal(docTitle('\n\n  银发角色  \n正文'), '银发角色')
   assert.equal(docTitle('\uFEFF## 提示词\nhello'), '提示词')
   assert.equal(docTitle(''), '')
@@ -108,7 +108,7 @@ test('docTitle 取第一行非空行，去掉 markdown 井号', () => {
 
 test('extractPromptSection：有「提示词」标题只取那一段', () => {
   const text = [
-    '# Belle Anima',
+    '# 示例角色',
     '',
     '这是一份说明，不该被塞进 prompt。',
     '',
@@ -212,12 +212,12 @@ test('scoreDocForLora：名字完全不对，但正文提到 LoRA 名 + 有提�
   const text = [
     '# 银发角色',
     '',
-    '这套 LoRA 是 Belle Anima v1 训练出来的，用在 SDXL 上。',
+    '这套 LoRA 是 Luna Anima v1 训练出来的，用在 SDXL 上。',
     '',
     '## 提示词',
     'masterpiece, best quality, 1girl, silver long hair, red eyes',
   ].join('\n')
-  const result = scoreDocForLora(doc, text, 'Belle Anima v1.safetensors')
+  const result = scoreDocForLora(doc, text, 'Luna Anima v1.safetensors')
   assert.ok(result.score >= 45, `分数应该够高，实际 ${result.score}`)
   assert.deepEqual(result.reasons, ['正文提到 LoRA 名', '有「提示词」小标题', '内容像提示词'])
   assert.equal(result.promptish, true)
@@ -227,19 +227,19 @@ test('scoreDocForLora：名字完全不对，但正文提到 LoRA 名 + 有提�
 })
 
 test('scoreDocForLora：文件名一致分最高；散文得零分', () => {
-  const named = { name: 'belle_anima_v1.md', stem: 'belle_anima_v1', key: 'belle_anima_v1' }
-  const hit = scoreDocForLora(named, 'a girl, standing, in a garden, at night', 'belle_anima_v1.safetensors')
+  const named = { name: 'luna_anima_v1.md', stem: 'luna_anima_v1', key: 'luna_anima_v1' }
+  const hit = scoreDocForLora(named, 'a girl, standing, in a garden, at night', 'luna_anima_v1.safetensors')
   assert.ok(hit.reasons.includes('文件名与 LoRA 名一致'))
   assert.ok(hit.score >= 100)
 
   const prose = { name: '画风随笔.txt', stem: '画风随笔', key: '画风随笔' }
-  const miss = scoreDocForLora(prose, '最近在试一种更冷的色调。\n画面的光比很大，阴影偏蓝。', 'belle_anima_v1.safetensors')
+  const miss = scoreDocForLora(prose, '最近在试一种更冷的色调。\n画面的光比很大，阴影偏蓝。', 'luna_anima_v1.safetensors')
   assert.equal(miss.score, 0)
   assert.deepEqual(miss.reasons, [])
 
   // 部分命中：文件名里有 2/3 个词
-  const partial = { name: 'belle_anima_notes.md', stem: 'belle_anima_notes', key: 'belle_anima_notes' }
-  const half = scoreDocForLora(partial, 'nothing here', 'belle_anima_v1.safetensors')
+  const partial = { name: 'luna_anima_notes.md', stem: 'luna_anima_notes', key: 'luna_anima_notes' }
+  const half = scoreDocForLora(partial, 'nothing here', 'luna_anima_v1.safetensors')
   assert.ok(half.reasons.some((item) => /文件名命中 2\/3 个词/.test(item)), half.reasons.join('、'))
 })
 
@@ -251,7 +251,7 @@ test('readLoraDocs：目录留空直接返回空清单，一个文件都不读',
 
 test('readLoraDocs：只收 .md/.markdown/.txt，跳过别的类型，目录不存在不抛', async () => {
   await withDir({
-    'belle_anima_v1.md': 'a',
+    'luna_anima_v1.md': 'a',
     'other.markdown': 'b',
     'plain.txt': 'c',
     'cover.png': 'not a doc',
@@ -260,9 +260,9 @@ test('readLoraDocs：只收 .md/.markdown/.txt，跳过别的类型，目录不�
     const listed = await readLoraDocs(root)
     assert.equal(listed.ok, true)
     assert.deepEqual(listed.docs.map((doc) => doc.name).sort(), [
-      'belle_anima_v1.md', 'nested.md', 'other.markdown', 'plain.txt',
+      'luna_anima_v1.md', 'nested.md', 'other.markdown', 'plain.txt',
     ])
-    assert.equal(listed.docs.find((doc) => doc.name === 'belle_anima_v1.md').key, 'belle_anima_v1')
+    assert.equal(listed.docs.find((doc) => doc.name === 'luna_anima_v1.md').key, 'luna_anima_v1')
     assert.equal(listed.docs.find((doc) => doc.name === 'nested.md').key, 'nested')
 
     // 目录不存在 → ok:false + 中文原因，绝不抛
@@ -287,7 +287,7 @@ test('rankLoraDocs + chooseLoraDoc：名字不对齐也能 match，散文不参�
     '角色笔记.md': [
       '# 银发角色',
       '',
-      '这套是 Belle Anima v1 训的。',
+      '这套是 Luna Anima v1 训的。',
       '',
       '## 提示词',
       'masterpiece, best quality, 1girl, silver long hair, red eyes',
@@ -296,7 +296,7 @@ test('rankLoraDocs + chooseLoraDoc：名字不对齐也能 match，散文不参�
     'cover.png': 'not a doc',
   }, async (root) => {
     const listed = await readLoraDocs(root)
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors')
     assert.equal(ranked.total, 2)
     assert.equal(ranked.scanned, 2)
     assert.equal(ranked.candidates[0].doc.name, '角色笔记.md')
@@ -317,7 +317,7 @@ test('rankLoraDocs：触到扫描上限时记 stoppedBy 并列出没打分的篇
   }
   await withDir(files, async (root) => {
     const listed = await readLoraDocs(root)
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors', { limit: 2 })
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors', { limit: 2 })
     assert.equal(ranked.total, 5)
     assert.equal(ranked.scanned, 2)
     assert.equal(ranked.stoppedBy, 'limit')
@@ -330,7 +330,7 @@ test('rankLoraDocs：触到扫描上限时记 stoppedBy 并列出没打分的篇
   // 没触到上限时两个字段都是空的 —— 别让人误以为「总有文档没看」
   await withDir({ 'a.txt': '1girl, solo, long hair' }, async (root) => {
     const listed = await readLoraDocs(root)
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors')
     assert.equal(ranked.stoppedBy, '')
     assert.deepEqual(ranked.notScanned, [])
   })
@@ -343,7 +343,7 @@ test('chooseLoraDoc：只有一篇像提示词时用 sole，都不像就 none', 
     'notes.txt': '这里记一点杂事。\n买牛奶，修图，回消息。',
   }, async (root) => {
     const listed = await readLoraDocs(root)
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors')
     const { chosen, mode } = chooseLoraDoc(ranked.candidates)
     assert.equal(mode, 'sole')
     assert.equal(chosen.doc.name, 'random-name.md')
@@ -355,7 +355,7 @@ test('chooseLoraDoc：只有一篇像提示词时用 sole，都不像就 none', 
     'b.txt': '另一份笔记。\n今天下雨，没有出门。',
   }, async (root) => {
     const listed = await readLoraDocs(root)
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors')
     const { chosen, mode } = chooseLoraDoc(ranked.candidates)
     assert.equal(mode, 'none')
     assert.equal(chosen, null)
@@ -369,7 +369,7 @@ test('chooseLoraDoc：只有一篇像提示词时用 sole，都不像就 none', 
 test('子文件夹里的文档也算：按角色分目录摆照样能挑中', async () => {
   await withDir({
     // 角色名当文件夹、文档名随便取 —— 常见的摆法
-    'belle_anima_v1/角色.md': [
+    'luna_anima_v1/角色.md': [
       '# 银发角色',
       '',
       '## 提示词',
@@ -381,12 +381,12 @@ test('子文件夹里的文档也算：按角色分目录摆照样能挑中', as
     const listed = await readLoraDocs(root)
     assert.equal(listed.ok, true)
     // 两层都在清单里，且带上了相对路径
-    assert.deepEqual(listed.docs.map((doc) => doc.rel).sort(), ['belle_anima_v1/角色.md', '画风/冷色调.txt'])
+    assert.deepEqual(listed.docs.map((doc) => doc.rel).sort(), ['luna_anima_v1/角色.md', '画风/冷色调.txt'])
 
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors')
     const { chosen, mode } = chooseLoraDoc(ranked.candidates)
     assert.equal(mode, 'match')
-    assert.equal(chosen.doc.rel, 'belle_anima_v1/角色.md')
+    assert.equal(chosen.doc.rel, 'luna_anima_v1/角色.md')
     // 文件夹名就是 LoRA 名 → 命中「所在文件夹名与 LoRA 名一致」
     assert.ok(chosen.reasons.includes('所在文件夹名与 LoRA 名一致'), chosen.reasons.join('、'))
     assert.match(chosen.section.text, /silver long hair/)
@@ -409,36 +409,36 @@ test('深度上限：第 4 层再往下的文档不扫（防止误指整个盘�
 test('模型与文档并排放在同一个文件夹：这是最硬的配对证据', async () => {
   await withDir({
     // 真实摆法：一个角色一个文件夹，LoRA 文件和提示词文档放一起，名字毫不相干
-    '铃/belle_anima_v1.safetensors': 'not a doc',
-    '铃/绝区零 铃.txt': [
+    '露娜/luna_anima_v1.safetensors': 'not a doc',
+    '露娜/幻想计划 露娜.txt': [
       'Use the identity token plus one outfit token.',
       '',
       'Base outfit',
-      'bellezzz, baseout, black shirt, long sleeves, jacket, orange gloves',
+      'lunaxyz, baseout, black shirt, long sleeves, jacket, orange gloves',
     ].join('\n'),
     // 另一个角色也有自己的文件夹与文档，不能串台
-    '绫地宁宁/ayachi-nene-0.2-32.safetensors': 'not a doc',
-    '绫地宁宁/绫地宁宁_提示词清单.txt': 'nene, long hair, blue eyes, school uniform',
+    '白鸟可可/shiratori-koko-0.2-32.safetensors': 'not a doc',
+    '白鸟可可/白鸟可可_提示词清单.txt': 'koko, long hair, blue eyes, school uniform',
   }, async (root) => {
     const listed = await readLoraDocs(root)
     // 模型文件本身不是文档，不会进清单；但它的名字被记进同目录文档的 siblings
-    assert.deepEqual(listed.docs.map((doc) => doc.rel).sort(), ['铃/绝区零 铃.txt', '绫地宁宁/绫地宁宁_提示词清单.txt'].sort())
-    const bell = listed.docs.find((doc) => doc.rel === '铃/绝区零 铃.txt')
-    assert.deepEqual(bell.siblings, ['belle_anima_v1'])
+    assert.deepEqual(listed.docs.map((doc) => doc.rel).sort(), ['露娜/幻想计划 露娜.txt', '白鸟可可/白鸟可可_提示词清单.txt'].sort())
+    const bell = listed.docs.find((doc) => doc.rel === '露娜/幻想计划 露娜.txt')
+    assert.deepEqual(bell.siblings, ['luna_anima_v1'])
 
-    const ranked = await rankLoraDocs(listed.docs, 'belle_anima_v1.safetensors')
+    const ranked = await rankLoraDocs(listed.docs, 'luna_anima_v1.safetensors')
     const { chosen, mode } = chooseLoraDoc(ranked.candidates)
     assert.equal(mode, 'match')
     // 名字完全不对齐，靠「同目录」拿下
-    assert.equal(chosen.doc.rel, '铃/绝区零 铃.txt')
+    assert.equal(chosen.doc.rel, '露娜/幻想计划 露娜.txt')
     assert.ok(chosen.reasons.includes('和这个 LoRA 摆在同一个文件夹'), chosen.reasons.join('、'))
-    assert.match(chosen.section.text, /bellezzz/)
+    assert.match(chosen.section.text, /lunaxyz/)
 
     // 另一个角色的 LoRA 只会挑到自己的那篇，不会因为都在同一棵树下就串台
-    const other = await rankLoraDocs(listed.docs, 'ayachi-nene-0.2-32.safetensors')
+    const other = await rankLoraDocs(listed.docs, 'shiratori-koko-0.2-32.safetensors')
     const picked = chooseLoraDoc(other.candidates)
     assert.equal(picked.mode, 'match')
-    assert.equal(picked.chosen.doc.rel, '绫地宁宁/绫地宁宁_提示词清单.txt')
+    assert.equal(picked.chosen.doc.rel, '白鸟可可/白鸟可可_提示词清单.txt')
   })
 })
 
@@ -480,14 +480,14 @@ test('composeLoraPrompt：空文档原样返回，有内容才拼接', () => {
 })
 
 test('tagishLine：逗号分隔的 tag 串是 tag，中文说明 / 表格 / 全角括号都不是', () => {
-  assert.equal(tagishLine('tenshi_amane_school, hairband, black hairband, braid, yellow necktie'), true)
+  assert.equal(tagishLine('kazami_haru_school, hairband, black hairband, braid, yellow necktie'), true)
   // 末尾挂着分隔符也算同一行（作者手滑多打了个逗号）
   assert.equal(tagishLine('masterpiece, best quality, 1girl, solo, '), true)
   // 太短 / 段数不够
   assert.equal(tagishLine('a, b'), false)
   assert.equal(tagishLine('masterpiece, best quality, 1girl'), true)
   // 中文叙述、句号收尾、表格、全角括号里的说明
-  assert.equal(tagishLine('这套是 Belle Anima v1 训的。'), false)
+  assert.equal(tagishLine('这套是 Luna Anima v1 训的。'), false)
   assert.equal(tagishLine('| 项目 | 说明 |'), false)
   assert.equal(tagishLine('off shoulder（要披肩时用）, lowres, bad anatomy, bad hands'), false)
   // 「一段中文标签 + 一串英文 tag」混排：绝大多数段不是纯英文，判掉（交给上层剥标签）
@@ -499,24 +499,24 @@ test('tagishLine：逗号分隔的 tag 串是 tag，中文说明 / 表格 / 全�
 
 test('parsePromptBlocks：正负分流、跨块延续、章节标题把态重置回正面', () => {
   const doc = [
-    '这套是 Belle Anima v1 训的。',
+    '这套是 Luna Anima v1 训的。',
     '',
     '▍① SCHOOL UNIFORM',
-    'tenshi_amane_school, hairband, braid, yellow necktie',
+    'kazami_haru_school, hairband, braid, yellow necktie',
     '',
     '负面：',
     'worst quality, low quality, bad anatomy',
     '',
     '▍② ROOM WEAR',
-    'tenshi_amane_roomwear, cardigan, floral print, sleeveless',
+    'kazami_haru_roomwear, cardigan, floral print, sleeveless',
     '',
     '作者备注：无。',
   ].join('\n')
   const parsed = parsePromptBlocks(doc)
   assert.deepEqual(parsed.positive.map((b) => b.text), [
-    'tenshi_amane_school, hairband, braid, yellow necktie',
+    'kazami_haru_school, hairband, braid, yellow necktie',
     // `▍②` 是章节标题：不然后面这段会跟着上一处「负面」一起算负面
-    'tenshi_amane_roomwear, cardigan, floral print, sleeveless',
+    'kazami_haru_roomwear, cardigan, floral print, sleeveless',
   ])
   assert.deepEqual(parsed.negative.map((b) => b.text), ['worst quality, low quality, bad anatomy'])
   assert.equal(parsed.blocks, 5)
@@ -535,7 +535,7 @@ test('parsePromptBlocks：行内 tag、中文标签、方括号占位符都要�
     '',
     '军装 peaked cap, military hat, black headwear, white gloves, military uniform',
     '',
-    'masterpiece, best quality, 1girl, solo, shiki natsume, [在这里写你要的服装标签], looking at viewer',
+    'masterpiece, best quality, 1girl, solo, hoshino yume, [在这里写你要的服装标签], looking at viewer',
     '',
     '校服 school uniform, black pantyhose, white skirt',
     '',
@@ -546,7 +546,7 @@ test('parsePromptBlocks：行内 tag、中文标签、方括号占位符都要�
     // 段首中文标签是给人看的，剥掉
     'peaked cap, military hat, black headwear, white gloves, military uniform',
     // 方括号占位符是模板槽位，不该进 prompt
-    'masterpiece, best quality, 1girl, solo, shiki natsume, looking at viewer',
+    'masterpiece, best quality, 1girl, solo, hoshino yume, looking at viewer',
     'school uniform, black pantyhose, white skirt',
   ])
   // 冒号后面直接跟 tag 的写法
@@ -555,11 +555,11 @@ test('parsePromptBlocks：行内 tag、中文标签、方括号占位符都要�
 
 test('parsePromptBlocks：`对策：负面里写死 xxx` 是正文，不是负面小标题', () => {
   const doc = [
-    'tenshi_amane_school, hairband, braid, yellow necktie',
+    'kazami_haru_school, hairband, braid, yellow necktie',
     '',
     '对策：负面里写死 school uniform, yellow necktie, suspender skirt。',
     '',
-    'tenshi_amane_roomwear, cardigan, floral print, sleeveless',
+    'kazami_haru_roomwear, cardigan, floral print, sleeveless',
   ].join('\n')
   const parsed = parsePromptBlocks(doc)
   assert.equal(parsed.negative.length, 0)
@@ -623,13 +623,13 @@ test('pickPromptBlocks：短段不会因为「都提到 red eyes」把整段长 
 test('composeDocSection：多套服装走 tags 模式，单段 tag / 纯散文退回整段按边界收口', () => {
   // 多套服装：按「套」挑，一次只并一套（另一套不出现在结果里）
   const multi = composeDocSection([
-    '这套 LoRA 用 Belle Anima v1 训的。',
+    '这套 LoRA 用 Luna Anima v1 训的。',
     '',
     '## 提示词',
-    'belle_anima_v1, school',
+    'luna_anima_v1, school',
     'school_uniform, yellow necktie, pleated skirt',
     '',
-    'belle_anima_v1, battle',
+    'luna_anima_v1, battle',
     'battle_uniform, combat boots, silver hair',
   ].join('\n'), { maxChars: 4000, prompt: '1girl, battle uniform' })
   assert.equal(multi.mode, 'tags')
@@ -641,7 +641,7 @@ test('composeDocSection：多套服装走 tags 模式，单段 tag / 纯散文�
 
   // 单段 tag + 负面：没有可互斥的「套」，退回整段收口，负面照旧
   const single = composeDocSection([
-    '这套 LoRA 用 Belle Anima v1 训的。',
+    '这套 LoRA 用 Luna Anima v1 训的。',
     '',
     '## 提示词',
     '1girl, green eyes, pink hair, short hair',
@@ -691,85 +691,85 @@ test('findNegativeNode：顺着 KSampler.negative 找 CLIPTextEncode，不靠节
 })
 
 // ── 角色别名：中文 / 日文 / 罗马音都对得上 LoRA 文件名 ──────────────────────
-// 用户说的往往是中文（四季夏目），LoRA 文件名却是罗马音或编号（natsume-000016）。
+// 用户说的往往是中文（星野梦梦），LoRA 文件名却是罗马音或编号（yume-anima）。
 // 对照表只能从已有证据里取 —— 文档标题行的「中文（日文 / 罗马音）」就是现成的。
 
 test('docAliases：从标题行同时取出中文、日文、罗马音', () => {
   const { line, aliases } = docAliases([
     '========================================================================',
-    '四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单',
-    '版本：natsume-ani1.0',
+    '星野梦梦（星野 ゆめ / Hoshino Yume）Anima LoRA 提示词清单',
+    '版本：yume-ani1.0',
   ].join('\n'))
-  assert.match(line, /四季夏目/)
-  for (const want of ['四季夏目', '四季 ナツメ', 'ナツメ', 'Shiki Natsume', 'Natsume']) {
+  assert.match(line, /星野梦梦/)
+  for (const want of ['星野梦梦', '星野 ゆめ', 'ゆめ', 'Hoshino Yume', 'Yume']) {
     assert.ok(aliases.includes(want), `别名里缺「${want}」：${JSON.stringify(aliases)}`)
   }
   // 体裁词与版本号不该混进来
-  for (const bad of ['Anima', 'LoRA', '提示词清单', 'natsume-ani1.0']) {
+  for (const bad of ['Anima', 'LoRA', '提示词清单', 'yume-ani1.0']) {
     assert.ok(!aliases.includes(bad), `别名里混进了「${bad}」`)
   }
   // 繁简两种写法在同一行里并排出现时都要收（不做繁简转换）
-  const twins = docAliases('谷风天音（谷風天音 / Tanikaze Amane）Illustrious LoRA 提示词清单')
-  assert.ok(twins.aliases.includes('谷风天音'))
-  assert.ok(twins.aliases.includes('谷風天音'))
+  const twins = docAliases('春风晴香（春風晴香 / Haru Kazami）Illustrious LoRA 提示词清单')
+  assert.ok(twins.aliases.includes('春风晴香'))
+  assert.ok(twins.aliases.includes('春風晴香'))
 })
 
 test('docAliases：一行说明 + 小节名的文档不会把小节名当角色名', () => {
-  // `绝区零 铃.txt` 的真实结构：第 1 行英文说明，下面是 Base outfit / Summer Skies 这些服装小节
+  // `幻想计划 露娜.txt` 的真实结构：第 1 行英文说明，下面是 Base outfit / Summer Skies 这些服装小节
   const text = [
     'Use the identity token plus one outfit token, then the kit line for that outfit.',
     '',
     'Base outfit',
-    'bellezzz, baseout, black shirt',
+    'lunaxyz, baseout, black shirt',
     '',
     'Summer Skies',
-    'bellezzz, summerout, white shirt',
+    'lunaxyz, summerout, white shirt',
   ].join('\n')
   assert.deepEqual(docAliases(text).aliases, [])
 })
 
 test('normalizeAlias：空格 / 下划线 / 中点 / 全角都不影响比对', () => {
-  assert.equal(normalizeAlias('Shiki Natsume'), normalizeAlias('shiki_natsume'))
-  assert.equal(normalizeAlias('四季 ナツメ'), normalizeAlias('四季・ナツメ'))
-  assert.equal(normalizeAlias('因幡　めぐる'), normalizeAlias('因幡めぐる'))
+  assert.equal(normalizeAlias('Hoshino Yume'), normalizeAlias('hoshino_yume'))
+  assert.equal(normalizeAlias('星野 ゆめ'), normalizeAlias('星野・ゆめ'))
+  assert.equal(normalizeAlias('月见　るり'), normalizeAlias('月见るり'))
 })
 
 test('loraAliases + matchLoraForPrompt：中文 / 日文 / 罗马音都能挑中同一个 LoRA', () => {
   const docs = [
     {
-      stem: '四季夏目_Anima_LoRA_提示词清单',
-      raw: '========================================================================\n四季夏目（四季 ナツメ / Shiki Natsume）Anima LoRA 提示词清单\n',
-      siblings: ['natsume_000016'],
+      stem: '星野梦梦_Anima_LoRA_提示词清单',
+      raw: '========================================================================\n星野梦梦（星野 ゆめ / Hoshino Yume）Anima LoRA 提示词清单\n',
+      siblings: ['yume_anima'],
     },
     {
-      stem: '谷风天音__提示词清单',
-      raw: '谷风天音（谷風天音 / Tanikaze Amane）Illustrious LoRA 提示词清单\n',
-      siblings: ['tenshi_amane'],
+      stem: '春风晴香__提示词清单',
+      raw: '春风晴香（春風晴香 / Haru Kazami）Illustrious LoRA 提示词清单\n',
+      siblings: ['kazami_haru'],
     },
   ]
-  const loras = ['natsume-000016.safetensors', 'tenshi_amane.safetensors', 'belle_anima_v1.safetensors']
-  const natsume = loraAliases('natsume-000016.safetensors', docs)
-  // 文件名只给「natsume」，中文/日文靠同目录文档补上
-  assert.ok(natsume.aliases.includes('四季夏目'))
-  assert.ok(natsume.aliases.includes('四季 ナツメ'))
-  assert.ok(natsume.sources.docs.length > 0)
+  const loras = ['yume-anima.safetensors', 'kazami_haru.safetensors', 'luna_anima_v1.safetensors']
+  const yume = loraAliases('yume-anima.safetensors', docs)
+  // 文件名只给「yume」，中文/日文靠同目录文档补上
+  assert.ok(yume.aliases.includes('星野梦梦'))
+  assert.ok(yume.aliases.includes('星野 ゆめ'))
+  assert.ok(yume.sources.docs.length > 0)
 
-  for (const prompt of ['画个四季夏目', '四季 ナツメ を描いて', 'shiki natsume', 'NATSUME']) {
+  for (const prompt of ['画个星野梦梦', '星野 ゆめ を描いて', 'hoshino yume', 'YUME']) {
     const matched = matchLoraForPrompt(prompt, loras, docs)
-    assert.equal(matched.pick, 'natsume-000016.safetensors', `「${prompt}」没挑中：${matched.reason}`)
+    assert.equal(matched.pick, 'yume-anima.safetensors', `「${prompt}」没挑中：${matched.reason}`)
     assert.equal(matched.candidates.length, 1)
   }
   // 同理，罗马音先行的文件名也能被中文 prompt 命中
-  assert.equal(matchLoraForPrompt('画个谷风天音', loras, docs).pick, 'tenshi_amane.safetensors')
-  assert.equal(matchLoraForPrompt('tanikaze amane', loras, docs).pick, 'tenshi_amane.safetensors')
+  assert.equal(matchLoraForPrompt('画个春风晴香', loras, docs).pick, 'kazami_haru.safetensors')
+  assert.equal(matchLoraForPrompt('haru kazami', loras, docs).pick, 'kazami_haru.safetensors')
 })
 
 test('matchLoraForPrompt：认不出就不挂，认出多个就列候选', () => {
   const docs = [
-    { stem: '四季夏目', raw: '四季夏目（四季 ナツメ / Shiki Natsume）\n', siblings: ['natsume'] },
-    { stem: '因幡巡', raw: '因幡巡（因幡 めぐる / Inaba Meguru）\n', siblings: ['meguru'] },
+    { stem: '星野梦梦', raw: '星野梦梦（星野 ゆめ / Hoshino Yume）\n', siblings: ['yume'] },
+    { stem: '月见琉璃', raw: '月见琉璃（月見 るり / Tsukimi Ruri）\n', siblings: ['ruri'] },
   ]
-  const loras = ['natsume.safetensors', 'meguru.safetensors']
+  const loras = ['yume.safetensors', 'ruri.safetensors']
   // 泛称 / 服装词 / 空 prompt 都不能当成角色
   for (const prompt of ['画个美少女', 'summer outfit', '', 'a girl, solo, best quality']) {
     const matched = matchLoraForPrompt(prompt, loras, docs)
@@ -778,12 +778,12 @@ test('matchLoraForPrompt：认不出就不挂，认出多个就列候选', () =>
     assert.match(matched.reason, /没在 prompt 里认出/)
   }
   // 同时点了两个角色 → 不替你猜
-  const both = matchLoraForPrompt('画个四季夏目和因幡巡', loras, docs)
+  const both = matchLoraForPrompt('画个星野梦梦和月见琉璃', loras, docs)
   assert.equal(both.pick, '')
   assert.equal(both.candidates.length, 2)
   assert.match(both.reason, /不替你猜/)
   // loras 为空时不抛错
-  assert.equal(matchLoraForPrompt('四季夏目', [], docs).pick, '')
+  assert.equal(matchLoraForPrompt('星野梦梦', [], docs).pick, '')
 })
 
 test('describeDrawConfig：把「模型 / LoRA 开关 / 文档目录」讲成模型能直接读的几句话', () => {

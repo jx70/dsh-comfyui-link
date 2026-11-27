@@ -5,7 +5,7 @@
 # 不用手改 profile 自己的 cordis.patch.yml。
 #
 #   dsh plugin --profile web add dsh-comfyui-link
-#   （跟最新代码：dsh plugin --profile web add github:jx70/dsh-comfyui-link）
+#   （跟最新代码：dsh plugin --profile web add github:YOUR_GITHUB_USER/dsh-comfyui-link）
 #   （本地开发：dsh plugin --profile web add link:<插件目录>）
 #
 # 本文件声明两件事：
@@ -43,7 +43,7 @@
                 2. 用 comfy_run（mode="template"）提交，prompt 写完整描述，width/height 用 1024（用户指定则按用户的，取 16 的倍数）。
                 3. 用 comfy_result 取图（单张 wait_seconds 120，多张按张数加），把图给用户看，并简短交代：提示词、尺寸、用的哪个模型。
 
-                画具体角色时（用户点名了角色，比如「画个四季夏目」）：
+                画具体角色时（用户点名了角色，比如「画个星野梦梦」）：
                 - 直接传 lora:"auto" —— 插件会按 prompt 里的角色名去对 ComfyUI 的 loras 名单（中文 / 日文 / 罗马音都认），
                   唯一命中就自动挂上，并顺手把该角色的提示词文档里挑中的 tag 段并进 prompt、「负面：」那段并进负面词。
                 - 认不出或多命中时，结果里会写明原因和候选 —— 照它说的补一句就行，不要反复重试同一个请求。
