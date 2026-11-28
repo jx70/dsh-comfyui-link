@@ -11,7 +11,7 @@
  */
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -166,11 +166,39 @@ test('索引：append / findByPromptId / findByFilename / recent，坏行跳过'
 
     // 写入一条半截坏行，readAll 应跳过它
     const file = await store.indexPath()
-    const { readFile } = await import('node:fs/promises')
     const text = await readFile(file, 'utf8')
     await writeFile(file, `${text}{"promptId":"broken"\n`, 'utf8')
     assert.equal(await store.findByPromptId('broken'), null)
     assert.equal((await store.findByPromptId('p1'))?.title, 'first')
+  })
+})
+
+test('索引：并发 append 20 条不丢记录（写锁串行化）', async () => {
+  await withTempRoot(async (root) => {
+    const store = createWorkspaceStore({ root })
+    // 同时发起 20 个 append；无锁时 read-modify-write 会互相覆盖，最终只剩几条。
+    await Promise.all(Array.from({ length: 20 }, (_, i) =>
+      store.append({ promptId: `p${i}`, graph: GRAPH, files: [] })))
+    const all = await store.recent(2000)
+    const ids = new Set(all.map((e) => e.promptId))
+    assert.equal(ids.size, 20, `并发 append 后应保留全部 20 条，实际 ${ids.size} 条`)
+  })
+})
+
+test('索引：并发 append 与 updateFiles 混跑不丢图', async () => {
+  await withTempRoot(async (root) => {
+    const store = createWorkspaceStore({ root })
+    await store.append({ promptId: 'base', graph: GRAPH, files: [] })
+    const ops = []
+    for (let i = 0; i < 15; i += 1) {
+      ops.push(store.append({ promptId: `p${i}`, graph: GRAPH, files: [] }))
+      ops.push(store.updateFiles('base', [{ filename: `img${i}.png`, type: 'output', subfolder: '' }]))
+    }
+    await Promise.all(ops)
+    const base = await store.findByPromptId('base')
+    // base 的 files 累积合并，不该被并发的 append 覆盖成空或只剩一两张
+    assert.ok(base.files.length >= 10, `base 应累积多张图，实际 ${base.files.length} 张`)
+    assert.equal((await store.recent(2000)).length, 16)
   })
 })
 
@@ -185,6 +213,48 @@ test('索引：updateFiles 去重合并，覆盖同文件名', async () => {
     const hit = await store.findByPromptId('p1')
     assert.equal(hit.files.length, 2)
     assert.equal(await store.updateFiles('missing', [{ filename: 'x.png' }]), false)
+  })
+})
+
+test('removeImage：删磁盘文件 + 摘索引 + 记入删除名单（含子目录）', async () => {
+  await withTempRoot(async (root) => {
+    const store = createWorkspaceStore({ root })
+    const sub = join(root, 'dsh')
+    await mkdir(sub, { recursive: true })
+    await writeFile(join(root, 'a.png'), 'A')
+    await writeFile(join(sub, 'b.png'), 'B')
+    await store.append({ promptId: 'p1', graph: GRAPH, files: [
+      { filename: 'a.png', type: 'output', subfolder: '' },
+      { filename: 'b.png', type: 'output', subfolder: 'dsh' },
+    ] })
+    const r1 = await store.removeImage({ filename: 'a.png', type: 'output', subfolder: '' })
+    assert.equal(r1.ok, true)
+    assert.equal(r1.removedFile, true)
+    assert.equal(r1.removedFromIndex, true)
+    assert.equal((await store.findByPromptId('p1')).files.length, 1)
+
+    const r2 = await store.removeImage({ filename: 'b.png', type: 'output', subfolder: 'dsh' })
+    assert.equal(r2.ok, true)
+    assert.equal((await store.findByPromptId('p1')).files.length, 0)
+    // 删除名单把两条都记下了，快照据此过滤 history 回写
+    const keys = await store.deletedKeys()
+    assert.ok(keys.has('output||a.png'))
+    assert.ok(keys.has('output|dsh|b.png'))
+
+    // 再删一次：文件已不在，仍返回 ok（幂等），索引不会重复减
+    const again = await store.removeImage({ filename: 'a.png', type: 'output', subfolder: '' })
+    assert.equal(again.ok, true)
+    assert.equal(again.missingFile, true)
+  })
+})
+
+test('removeImage：拒绝路径穿越与非法文件名', async () => {
+  await withTempRoot(async (root) => {
+    const store = createWorkspaceStore({ root })
+    assert.equal((await store.removeImage({ filename: '../secret.png' })).ok, false)
+    assert.equal((await store.removeImage({ filename: 'a/b.png' })).ok, false)
+    assert.equal((await store.removeImage({ filename: '' })).ok, false)
+    assert.equal((await store.removeImage({ filename: 'x.png', subfolder: '../evil' })).ok, false)
   })
 })
 
@@ -325,7 +395,7 @@ function routeOf(routes, path) {
   return routes.find((r) => r.path === path)
 }
 
-test('4 条 workspace 路由都注册上', () => {
+test('5 条 workspace 路由都注册上', () => {
   const fake = createFakeCtx()
   plugin.apply(fake.ctx, {})
   for (const path of [
@@ -333,6 +403,7 @@ test('4 条 workspace 路由都注册上', () => {
     '/api/comfyui/workspace/workflow',
     '/api/comfyui/workspace/image',
     '/api/comfyui/workspace/submit',
+    '/api/comfyui/workspace/delete',
   ]) {
     assert.ok(routeOf(fake.routes, path), `缺路由 ${path}`)
   }
@@ -426,8 +497,7 @@ test('image 路由：代理 ComfyUI 产出图，拒绝路径穿越', async () =>
   } finally { await comfy.close() }
 })
 
-test('submit 路由：图上改参后写回工作流再提交，并记入索引', async () => {
-  const comfy = await startFakeComfy()
+test('submit 路由：图上改参后写回工作流再提交，并记入索引', async () => {  const comfy = await startFakeComfy()
   try {
     await withTempRoot(async (root) => {
       const fake = createFakeCtx()
@@ -458,6 +528,76 @@ test('submit 路由：图上改参后写回工作流再提交，并记入索引'
         method: 'POST', body: '{}',
       }))
       assert.equal(bad.status, 400)
+    })
+  } finally { await comfy.close() }
+})
+
+test('delete 路由：删磁盘图 + 摘索引，快照刷新不再回显已删图', async () => {
+  const comfy = await startFakeComfy({ historyWithImage: true })
+  try {
+    await withTempRoot(async (root) => {
+      const fake = createFakeCtx()
+      plugin.apply(fake.ctx, { baseUrl: comfy.baseUrl, outputRoot: root })
+      // 先造一张已索引的图
+      const store = createWorkspaceStore({ root })
+      const sub = join(root, 'dsh')
+      await mkdir(sub, { recursive: true })
+      await writeFile(join(sub, 'gone.png'), 'X')
+      await store.append({ promptId: 'del-1', graph: GRAPH, files: [{ filename: 'gone.png', type: 'output', subfolder: 'dsh' }] })
+
+      const route = routeOf(fake.routes, '/api/comfyui/workspace/delete')
+      const ok = await route.fetch(new Request('http://x/api/comfyui/workspace/delete', {
+        method: 'POST',
+        body: JSON.stringify({ filename: 'gone.png', subfolder: 'dsh', type: 'output' }),
+      }))
+      const data = await ok.json()
+      assert.equal(data.ok, true)
+      assert.equal(data.removedFile, true)
+
+      // 索引里这条记录的 files 已空
+      assert.equal((await store.findByPromptId('del-1')).files.length, 0)
+
+      // 已删名单记下后，即使 history 里还有这张图，快照也不会把它补回来
+      const snapRoute = routeOf(fake.routes, '/api/comfyui/workspace/snapshot')
+      const snap = await (await snapRoute.fetch(new Request('http://x/api/comfyui/workspace/snapshot'))).json()
+      const names = snap.generated.flatMap((r) => (r.files ?? []).map((f) => f.filename))
+      assert.ok(!names.includes('gone.png'), '已删的图不应出现在快照里')
+
+      // 非法文件名直接 400
+      const bad = await route.fetch(new Request('http://x/api/comfyui/workspace/delete', {
+        method: 'POST', body: JSON.stringify({ filename: '../secret.png' }),
+      }))
+      assert.equal(bad.status, 400)
+    })
+  } finally { await comfy.close() }
+})
+
+test('删除路由：索引里没有、只靠 history 合成的图也能删掉，刷新不再复活', async () => {
+  // 回归：historyToRecord 合成的记录此前没过 filterDeleted，删掉后下次刷新又被合成回来。
+  const comfy = await startFakeComfy({ historyWithImage: true })
+  try {
+    await withTempRoot(async (root) => {
+      const fake = createFakeCtx()
+      plugin.apply(fake.ctx, { baseUrl: comfy.baseUrl, outputRoot: root })
+
+      // 前置：索引为空，快照靠 /history 合成出 from-history.png
+      const snapRoute = routeOf(fake.routes, '/api/comfyui/workspace/snapshot')
+      const before = await (await snapRoute.fetch(new Request('http://x/api/comfyui/workspace/snapshot'))).json()
+      const beforeNames = before.generated.flatMap((r) => (r.files ?? []).map((f) => f.filename))
+      assert.ok(beforeNames.includes('from-history.png'), '前置条件：合成记录应出现在快照里')
+
+      // 删掉这张只存在于 history 的图（磁盘上没有也无所谓，删名单要记下）
+      const route = routeOf(fake.routes, '/api/comfyui/workspace/delete')
+      const res = await route.fetch(new Request('http://x/api/comfyui/workspace/delete', {
+        method: 'POST',
+        body: JSON.stringify({ filename: 'from-history.png', subfolder: 'dsh', type: 'output' }),
+      }))
+      assert.equal((await res.json()).ok, true)
+
+      // 刷新：合成记录必须被过滤掉，不能复活
+      const after = await (await snapRoute.fetch(new Request('http://x/api/comfyui/workspace/snapshot'))).json()
+      const afterNames = after.generated.flatMap((r) => (r.files ?? []).map((f) => f.filename))
+      assert.ok(!afterNames.includes('from-history.png'), '删掉后不应被 history 合成记录复活')
     })
   } finally { await comfy.close() }
 })

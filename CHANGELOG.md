@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-11-28
+
+### 新增
+
+- **产出图片 / 队列可删图**：会话视图的「产出图片」「队列」两个标签，以及放大弹窗，每张图下方新增红色「删除图片」按钮。点击后确认 → 删磁盘文件 → 从 `prompt-index.jsonl` 摘掉这条 files 项 → 记入 `_dsh_meta/deleted-images.json`，刷新后不再出现。
+  - Host 侧新增 `POST /api/comfyui/workspace/delete`；`workspaceStore.removeImage()` 做三重防线：`safeFilename` 拒纯文件名以外的输入、`subfolder` 拒绝 `..`/`\`/前导 `/`、`resolve()` 后必须仍落在 ComfyUI output 根（或 temp 兄弟目录）内。删不存在的文件视为成功（幂等）。
+  - 已删名单参与快照过滤：索引记录、history 补全、**history 合成记录**、jobs 缩略图四处都过滤，避免 ComfyUI 原生 `/history` 有这条记录时删完刷新又冒出来。
+- **指定模型失败即停，不自动换模型**：`comfy_run` / `comfy_review` 在用户点名 `unet`（或绘图控件已选模型）时以 `strict` 模式解析模型 —— 模型不存在、认不出系列、配套编码器/VAE 匹配不到都直接报错返回，不再静默用文件夹里第一个模型兜底；错误文案附带「没有换模型，请把错误直接告诉用户」的提示。选「自动」时行为不变。
+
+### 修复
+
+- **产出图片里老图会消失**：快照此前用 `workspaceStore.recent(20)` 只取最近 20 条索引记录，老图被挤掉、只能靠 `/history` 兜底，history 被清就彻底不见。改为取全部索引记录（`recent` 上限 100 → 2000）。
+- **索引并发写丢记录**：`prompt-index.jsonl` 的 read-modify-write 无锁，`append` / `updateFiles` / `removeImage` 并发时后写会用旧快照覆盖先写，导致记录和图片间歇性丢失。新增进程内写队列 `withWriteLock`，把三个入口的读改写串行化。
+- **只存在于 `/history` 的图删不掉**：`historyToRecord` 合成的展示记录没经过删除过滤，删掉后下次刷新又被合成回来。现在合成记录同样过滤已删名单，过滤后无图则不合成。
+
+### 测试
+
+- 新增删除路由与 `removeImage` 用例（删文件/摘索引/记名单/子目录/幂等/拒绝路径穿越/非法文件名 400）、history 合成记录删除不复活回归、并发 append 20 条不丢记录、并发 append+updateFiles 混跑不丢图、strict 模式 6 项用例。全套 268 条测试通过。
+
 ## [1.13.0] - 2026-11-28
 
 ### 新增

@@ -13,7 +13,7 @@ import test from 'node:test'
 import {
   ComfyError, MODEL_FOLDERS, buildImg2Img, buildTxt2Img, buildUpscale,
   collectImages, createClient, humanDuration, inferModelFamily, injectPrompt, normalizeGraph,
-  pickCompatible, resolveModels, summarizeGraph,
+  NO_FALLBACK_NOTE, pickCompatible, resolveModels, summarizeGraph,
 } from '../lib/comfy.mjs'
 import { preferModel } from '../index.js'
 
@@ -422,4 +422,88 @@ test('createClient 把连接层的 fetch 错误统一归一成 OFFLINE（不漏�
   } finally {
     globalThis.fetch = original
   }
+})
+
+// ── 指定模型失败时不换模型（strict 模式）────────────────────────────────
+test('strict：指定不存在的模型 → 报错带「不换模型」，并列出可选模型', () => {
+  const index = { diffusion_models: ['d1', 'd2'], checkpoints: ['ck1'], text_encoders: ['t1'], vae: ['v1'] }
+  assert.throws(
+    () => resolveModels(index, { unet: 'nope', strict: true }),
+    (error) => {
+      assert.ok(error instanceof ComfyError)
+      assert.equal(error.code, 'MODEL')
+      assert.match(error.message, /nope/)
+      assert.match(error.message, /d1, d2/)
+      assert.ok(error.message.includes(NO_FALLBACK_NOTE))
+      return true
+    },
+  )
+})
+
+test('strict：指定存在但配套编码器/VAE 匹配不到 → 报错，绝不退回文件夹第一个', () => {
+  // sdxl 模型，但编码器/VAE 是 flux 专用关键词，按系列匹配不到
+  const index = {
+    diffusion_models: ['Illustrious-XL-v2.0.safetensors'],
+    text_encoders: ['t5xxl_flux.safetensors'],
+    vae: ['ae_flux.safetensors'],
+  }
+  assert.throws(
+    () => resolveModels(index, { unet: 'Illustrious-XL-v2.0.safetensors', strict: true }),
+    (error) => {
+      assert.ok(error instanceof ComfyError && error.code === 'MODEL')
+      // 报的是「无法用于生图」，而不是返回 t5xxl_flux / ae_flux 这种不匹配的搭配
+      assert.match(error.message, /无法用于生图/)
+      assert.ok(error.message.includes(NO_FALLBACK_NOTE))
+      return true
+    },
+  )
+  // 同一份 index，非 strict 仍按旧行为退回文件夹第一个（回归保护）
+  const loose = resolveModels(index, { unet: 'Illustrious-XL-v2.0.safetensors' })
+  assert.equal(loose.clip, 't5xxl_flux.safetensors')
+  assert.equal(loose.vae, 'ae_flux.safetensors')
+})
+
+test('strict：认不出模型系列且没指定 clipType → 报错，不用 stable_diffusion 兜底', () => {
+  const index = { diffusion_models: ['random_name'], text_encoders: ['t1'], vae: ['v1'] }
+  assert.throws(
+    () => resolveModels(index, { unet: 'random_name', strict: true }),
+    (error) => error instanceof ComfyError && /认不出模型系列/.test(error.message) && error.message.includes(NO_FALLBACK_NOTE),
+  )
+  // 显式给齐 clipType + clip + vae 时不算「认不出」，strict 也能正常出图
+  const ok = resolveModels(index, {
+    unet: 'random_name', clipType: 'stable_diffusion', clip: 't1', vae: 'v1', strict: true,
+  })
+  assert.equal(ok.unet, 'random_name')
+  assert.equal(ok.clipType, 'stable_diffusion')
+  assert.equal(ok.clip, 't1')
+  assert.equal(ok.vae, 'v1')
+})
+
+test('strict：指定模型且配套齐全 → 正常返回，不影响成功路径', () => {
+  const index = {
+    diffusion_models: ['Illustrious-XL-v2.0.safetensors'],
+    text_encoders: ['clip_l.safetensors'],
+    vae: ['sdxl_vae.safetensors'],
+  }
+  const got = resolveModels(index, { unet: 'Illustrious-XL-v2.0.safetensors', strict: true })
+  assert.equal(got.unet, 'Illustrious-XL-v2.0.safetensors')
+  assert.equal(got.clip, 'clip_l.safetensors')
+  assert.equal(got.vae, 'sdxl_vae.safetensors')
+  assert.equal(got.clipType, 'sdxl')
+  assert.equal(got.warnings.length, 0)
+})
+
+test('strict：整合包（checkpoint）指定即用，不要求配套编码器/VAE', () => {
+  const index = { diffusion_models: [], checkpoints: ['ck1.safetensors'], text_encoders: [], vae: [] }
+  assert.deepEqual(
+    resolveModels(index, { unet: 'ck1.safetensors', strict: true }),
+    { checkpoint: 'ck1.safetensors', warnings: [] },
+  )
+})
+
+test('strict：未指定模型（strict=true 但 unet 空）→ 仍走自动默认，不报错', () => {
+  const index = { diffusion_models: ['d1'], checkpoints: [], text_encoders: ['t1'], vae: ['v1'] }
+  // 调用方即使误传 strict:true，只要没有指定 unet 就不该触发严格闸门
+  const got = resolveModels(index, { strict: true })
+  assert.equal(got.unet, 'd1')
 })

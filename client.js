@@ -121,6 +121,11 @@ window.__ModuleLoader__.load({
         wsEnlarge: '放大',
         wsClose: '关闭',
         wsFindWorkflow: '反查工作流',
+        wsDeleteImage: '删除图片',
+        wsDeleteConfirm: '确定删除这张图片吗？此操作不可撤销。',
+        wsDeleting: '删除中…',
+        wsDeleteFailed: '删除失败：{reason}',
+        wsDeleted: '已删除 {name}',
         wsNoWorkflow: '这张图查不到工作流：{reason}',
         wsSourceIndex: '来自出图索引',
         wsSourceHistory: '来自 ComfyUI 历史',
@@ -268,6 +273,11 @@ window.__ModuleLoader__.load({
         wsEnlarge: 'Enlarge',
         wsClose: 'Close',
         wsFindWorkflow: 'Find workflow',
+        wsDeleteImage: 'Delete image',
+        wsDeleteConfirm: 'Delete this image? This cannot be undone.',
+        wsDeleting: 'Deleting…',
+        wsDeleteFailed: 'Delete failed: {reason}',
+        wsDeleted: 'Deleted {name}',
         wsNoWorkflow: 'No workflow found for this image: {reason}',
         wsSourceIndex: 'From generation index',
         wsSourceHistory: 'From ComfyUI history',
@@ -438,6 +448,8 @@ window.__ModuleLoader__.load({
 [data-comfy-chip]:focus-visible{outline:none;
   box-shadow:0 0 0 2px var(--dsw-focus-ring-color,var(--comfy-accent));}
 [data-comfy-chip][disabled]{opacity:.4;cursor:default;}
+[data-comfy-chip][data-danger]{color:var(--dsw-alias-state-error-primary,inherit);border-color:rgba(239,68,68,.4);}
+[data-comfy-chip][data-danger]:hover{background:rgba(239,68,68,.14);color:var(--dsw-alias-state-error-primary,inherit);}
 /* ── k91 会话视图「ComfyUI」页 ── */
 [data-comfy-workspace]{--ws-accent:var(--comfy-accent,#3b82f6);display:flex;flex-direction:column;gap:12px;
   height:100%;min-height:320px;box-sizing:border-box;padding:12px 14px 20px;overflow:auto;}
@@ -645,6 +657,7 @@ window.__ModuleLoader__.load({
       workflow: '/api/comfyui/workspace/workflow',
       image: '/api/comfyui/workspace/image',
       submit: '/api/comfyui/workspace/submit',
+      delete: '/api/comfyui/workspace/delete',
     }
     // ComfyUI 未启动 / 取不到 object_info 时的兜底枚举（和 KSampler 默认一致）
     const FALLBACK_SAMPLERS = ['euler', 'euler_ancestral', 'heun', 'dpm_2', 'dpm_2_ancestral', 'lms', 'dpmpp_2m', 'dpmpp_2m_sde', 'dpmpp_3m_sde', 'ddim', 'uni_pc']
@@ -1588,8 +1601,19 @@ window.__ModuleLoader__.load({
         }, submitting ? t('wsSubmitting') : t('wsResubmit')))
     }
 
-    /** 图库：缩略图 + 点击放大 + 「反查工作流」。 */
-    function ImageGallery({ generated, t, onFind, onEnlarge }) {
+    const imageKey = (img) => `${img?.type ?? 'output'}|${img?.subfolder ?? ''}|${img?.filename ?? ''}`
+
+    /** 删除图片的红色小按钮；禁用态显示「删除中…」。 */
+    function DeleteChip({ image, t, onDelete, disabled }) {
+      return h('button', {
+        'data-comfy-chip': '', 'data-danger': '', type: 'button',
+        title: t('wsDeleteImage'), disabled: !!disabled,
+        onClick: (e) => { e.stopPropagation(); onDelete?.(image) },
+      }, disabled ? t('wsDeleting') : t('wsDeleteImage'))
+    }
+
+    /** 图库：缩略图 + 点击放大 + 「反查工作流」+「删除图片」。 */
+    function ImageGallery({ generated, t, onFind, onEnlarge, onDelete, deleting }) {
       const images = []
       for (const rec of generated ?? []) {
         for (const f of rec.files ?? []) {
@@ -1608,11 +1632,12 @@ window.__ModuleLoader__.load({
             h('button', {
               'data-comfy-chip': '', type: 'button',
               onClick: () => onFind({ promptId: img.promptId, filename: img.filename }),
-            }, t('wsFindWorkflow'))))))
+            }, t('wsFindWorkflow')),
+            h(DeleteChip, { image: img, t, onDelete, disabled: deleting?.has(imageKey(img)) })))))
     }
 
     /** 大图查看弹层 */
-    function Lightbox({ image, t, onClose, onFind }) {
+    function Lightbox({ image, t, onClose, onFind, onDelete, deleting }) {
       if (!image) return null
       return h('div', { 'data-ws-lightbox': '', onClick: onClose },
         h('div', { 'data-ws-lightbox-inner': '', onClick: (e) => e.stopPropagation() },
@@ -1620,6 +1645,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-ws-lightbox-bar': '' },
             h('span', {}, image.filename),
             h('button', { 'data-comfy-chip': '', type: 'button', onClick: () => onFind({ promptId: image.promptId, filename: image.filename }) }, t('wsFindWorkflow')),
+            h(DeleteChip, { image, t, onDelete, disabled: deleting?.has(imageKey(image)) }),
             h('button', { 'data-comfy-chip': '', type: 'button', onClick: onClose }, t('wsClose')))))
     }
 
@@ -1663,7 +1689,7 @@ window.__ModuleLoader__.load({
       return { prompt, size, steps }
     }
 
-    function QueuePanel({ snapshot, t, onOpen, onEnlarge }) {
+    function QueuePanel({ snapshot, t, onOpen, onEnlarge, onDelete, deleting }) {
       const running = snapshot?.queue?.running ?? []
       const pending = snapshot?.queue?.pending ?? []
       const jobs = snapshot?.jobs ?? []
@@ -1708,6 +1734,9 @@ window.__ModuleLoader__.load({
                   'data-comfy-chip': '', type: 'button', title: t('wsQOpen'),
                   onClick: () => onOpen?.({ promptId: meta.promptId }),
                 }, t('wsQOpen'))
+              : null,
+            image
+              ? h(DeleteChip, { image, t, onDelete, disabled: deleting?.has(imageKey(image)) })
               : null))
       }
 
@@ -1747,6 +1776,9 @@ window.__ModuleLoader__.load({
                   'data-comfy-chip': '', type: 'button', title: t('wsQOpen'),
                   onClick: () => onOpen?.({ promptId }),
                 }, t('wsQOpen'))
+              : null,
+            image
+              ? h(DeleteChip, { image, t, onDelete, disabled: deleting?.has(imageKey(image)) })
               : null))
       }
 
@@ -1809,6 +1841,8 @@ window.__ModuleLoader__.load({
       const [highlight, setHighlight] = React.useState(null)
       const [submitting, setSubmitting] = React.useState(false)
       const [submitMsg, setSubmitMsg] = React.useState('')
+      const [deleteMsg, setDeleteMsg] = React.useState('')
+      const [deleting, setDeleting] = React.useState(() => new Set())
       const alive = React.useRef(true)
       React.useEffect(() => () => { alive.current = false }, [])
       // 切换工作流时清掉图例高亮，免得新图没有该类节点却整片变暗
@@ -1895,6 +1929,38 @@ window.__ModuleLoader__.load({
         }
       }, [refresh, t])
 
+      const deleteImage = React.useCallback(async (image) => {
+        if (!image?.filename) return
+        if (typeof globalThis.confirm === 'function' && !globalThis.confirm(t('wsDeleteConfirm'))) return
+        const key = imageKey(image)
+        setDeleting((prev) => new Set(prev).add(key))
+        setDeleteMsg('')
+        try {
+          const res = await hostFetch(WORKSPACE_API.delete, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+              filename: image.filename,
+              subfolder: image.subfolder ?? '',
+              type: image.type ?? 'output',
+            }),
+          })
+          const data = await res.json()
+          if (!alive.current) return
+          if (data?.ok) {
+            setDeleteMsg(interp(t('wsDeleted'), { name: image.filename }))
+            setEnlarged(null)
+            refresh()
+          } else {
+            setDeleteMsg(interp(t('wsDeleteFailed'), { reason: data?.reason ?? 'unknown' }))
+          }
+        } catch (e) {
+          if (alive.current) setDeleteMsg(interp(t('wsDeleteFailed'), { reason: String(e?.message ?? e) }))
+        } finally {
+          if (alive.current) setDeleting((prev) => { const next = new Set(prev); next.delete(key); return next })
+        }
+      }, [refresh, t])
+
       const offline = snapshot && snapshot.online === false
       return h('div', { 'data-comfy-workspace': '' },
         h('div', { 'data-ws-toolbar': '' },
@@ -1914,6 +1980,7 @@ window.__ModuleLoader__.load({
         lookup.reason ? h('div', { 'data-comfy-msg': '', 'data-bad': '' }, interp(t('wsNoWorkflow'), { reason: lookup.reason })) : null,
         lookup.source ? h('div', { 'data-comfy-msg': '' }, t(lookup.source === 'index' ? 'wsSourceIndex' : 'wsSourceHistory')) : null,
         submitMsg ? h('div', { 'data-comfy-msg': '' }, submitMsg) : null,
+        deleteMsg ? h('div', { 'data-comfy-msg': '' }, deleteMsg) : null,
 
         tab === 'workflow' ? h('div', { 'data-ws-body': '' },
           selected?.graph
@@ -1965,11 +2032,11 @@ window.__ModuleLoader__.load({
 
         tab === 'images' ? h('div', { 'data-ws-body': '' },
           h('div', { 'data-ws-note': '' }, t('wsClickImage')),
-          h(ImageGallery, { generated: snapshot?.generated, t, onFind: findWorkflow, onEnlarge: setEnlarged }))
+          h(ImageGallery, { generated: snapshot?.generated, t, onFind: findWorkflow, onEnlarge: setEnlarged, onDelete: deleteImage, deleting }))
           : null,
 
         tab === 'queue' ? h('div', { 'data-ws-body': '' }, h(QueuePanel, {
-          snapshot, t, onEnlarge: setEnlarged,
+          snapshot, t, onEnlarge: setEnlarged, onDelete: deleteImage, deleting,
           onOpen: ({ promptId, filename }) => {
             if (promptId) findWorkflow({ promptId })
             else if (filename) findWorkflow({ filename })
@@ -1977,7 +2044,7 @@ window.__ModuleLoader__.load({
           },
         })) : null,
 
-        h(Lightbox, { image: enlarged, t, onClose: () => setEnlarged(null), onFind: findWorkflow })
+        h(Lightbox, { image: enlarged, t, onClose: () => setEnlarged(null), onFind: findWorkflow, onDelete: deleteImage, deleting })
       )
     }
 

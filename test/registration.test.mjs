@@ -48,9 +48,11 @@ function boot(config = {}) {
 function startFakeComfy(overrides = {}) {
   const promptIds = []
   const lists = {
-    diffusion_models: ['a.safetensors'],
-    text_encoders: ['t.safetensors'],
-    vae: ['v.safetensors'],
+    // 文件名带 sdxl 关键词，pickCompatible 才能从系列推断出配套；
+    // strict 模式（绘图控件指定 unet 时自动开启）要求配套齐全，不能用裸 a.safetensors 触发兜底失败。
+    diffusion_models: ['a-sdxl.safetensors'],
+    text_encoders: ['clip_l.safetensors'],
+    vae: ['sdxl_vae.safetensors'],
     checkpoints: [],
     loras: [],
     ...overrides,
@@ -555,7 +557,7 @@ test('comfy_run：没传 lora 但配了文档目录 —— 结果里说清「这
     const { tools } = boot({
       baseUrl: server.baseUrl,
       timeoutMs: 2000,
-      draw: { unet: 'a.safetensors', lora: true },
+      draw: { unet: 'a-sdxl.safetensors', lora: true },
       loraDocs: { dir: root },
     })
     const result = await tools.get('comfy_run').execute({ mode: 'template', prompt: 'a cat' }, createExec())
@@ -583,7 +585,7 @@ test('comfy_run：lora:"auto" 认得出角色就自动挂上，并读该角色�
     const { tools } = boot({
       baseUrl: server.baseUrl,
       timeoutMs: 2000,
-      draw: { unet: 'a.safetensors', lora: true },
+      draw: { unet: 'a-sdxl.safetensors', lora: true },
       loraDocs: { dir: root },
     })
     // 用户说的是中文，LoRA 文件名是罗马音 —— auto 要能把两者对上
@@ -620,7 +622,7 @@ test('comfy_run：lora:"auto" 认不出角色就不挂，并说明「认不出 /
     const { tools } = boot({
       baseUrl: server.baseUrl,
       timeoutMs: 2000,
-      draw: { unet: 'a.safetensors', lora: true },
+      draw: { unet: 'a-sdxl.safetensors', lora: true },
       loraDocs: { dir: root },
     })
     // 认不出：不挂，说明原因，不抛错
@@ -653,7 +655,7 @@ test('comfy_run：lora:"auto" 认不出角色就不挂，并说明「认不出 /
 test('挂了 LoRA 但没配提示词目录：结果里交代「没查文档」，不再静默', async () => {
   const server = await startFakeComfy()
   try {
-    const { tools } = boot({ baseUrl: server.baseUrl, timeoutMs: 2000, draw: { unet: 'a.safetensors', lora: true } })
+    const { tools } = boot({ baseUrl: server.baseUrl, timeoutMs: 2000, draw: { unet: 'a-sdxl.safetensors', lora: true } })
     const result = await tools.get('comfy_run').execute(
       { mode: 'template', prompt: 'a cat', lora: 'luna.safetensors' },
       createExec(),
@@ -668,7 +670,7 @@ test('挂了 LoRA 但没配提示词目录：结果里交代「没查文档」�
 test('挂了 LoRA 但传 lora_doc:"off"：结果里交代「跳过了文档」', async () => {
   const server = await startFakeComfy()
   try {
-    const { tools } = boot({ baseUrl: server.baseUrl, timeoutMs: 2000, draw: { unet: 'a.safetensors', lora: true } })
+    const { tools } = boot({ baseUrl: server.baseUrl, timeoutMs: 2000, draw: { unet: 'a-sdxl.safetensors', lora: true } })
     const result = await tools.get('comfy_run').execute(
       { mode: 'template', prompt: 'a cat', lora: 'luna.safetensors', lora_doc: 'off' },
       createExec(),
@@ -698,7 +700,7 @@ test('graph 模式里有 LoraLoader：长文档按边界收口，结果里写明
     const { tools } = boot({
       baseUrl: server.baseUrl,
       timeoutMs: 2000,
-      draw: { unet: 'a.safetensors', lora: true },
+      draw: { unet: 'a-sdxl.safetensors', lora: true },
       loraDocs: { dir: root, maxChars: 500 },
     })
     const graph = {
@@ -746,7 +748,7 @@ test('graph 模式里有 LoraLoader：短文档全篇并入，结果里说「全
     const { tools } = boot({
       baseUrl: server.baseUrl,
       timeoutMs: 2000,
-      draw: { unet: 'a.safetensors', lora: true },
+      draw: { unet: 'a-sdxl.safetensors', lora: true },
       loraDocs: { dir: root },
     })
     const graph = {

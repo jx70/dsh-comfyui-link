@@ -35,6 +35,7 @@ import {
   humanDuration,
   injectPrompt,
   normalizeGraph,
+  NO_FALLBACK_NOTE,
   resolveModels,
   sleep,
   summarizeGraph,
@@ -2083,6 +2084,8 @@ const WORKSPACE_WORKFLOW_ROUTE = '/api/comfyui/workspace/workflow'
 const WORKSPACE_IMAGE_ROUTE = '/api/comfyui/workspace/image'
 /** POST /api/comfyui/workspace/submit —— 图上改完参数后重提交 */
 const WORKSPACE_SUBMIT_ROUTE = '/api/comfyui/workspace/submit'
+/** POST /api/comfyui/workspace/delete —— 从产出图片 / 队列里删除一张图 */
+const WORKSPACE_DELETE_ROUTE = '/api/comfyui/workspace/delete'
 
 // ── 唯一一条会「等用户点按钮」的路由 ──────────────────────────────────────
 // 设置页的「选择」按钮要弹的是**系统原生**文件夹选择框，而原生对话框只能开在
@@ -3029,7 +3032,7 @@ export function apply(ctx, config) {
       seed: i('随机种子，默认随机。想复现同一张图就传同一个值'),
       sampler: s('采样器，默认 euler；可选值查 comfy_node KSampler'),
       scheduler: s('调度器，默认 simple；可选值查 comfy_node KSampler'),
-      unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包。注意：对话栏左侧选中的模型优先，这里传的 unet 只在那边选的是「自动」时才生效；想临时换模型请让用户在对话栏里改'),
+      unet: s('生图模型文件名：可以是 diffusion_models 里的扩散模型，也可以是 checkpoints 里的整合包。注意：对话栏左侧选中的模型优先，这里传的 unet 只在那边选的是「自动」时才生效；想临时换模型请让用户在对话栏里改。一旦指定了模型，它用不了就直接报错返回给用户，不会自动换成别的模型；想自动选择就留空'),
       clip: s('文本编码器文件名，省略按生图模型系列自动匹配（匹配不到才用 text_encoders 里第一个）'),
       vae: s('VAE 文件名，省略按生图模型系列自动匹配（匹配不到才用 vae 里第一个）'),
       clipType: s('CLIPLoader.type（stable_diffusion/sdxl/sd3/flux 等），省略按生图模型系列自动推断；合法值取自本机 /object_info/CLIPLoader'),
@@ -3059,6 +3062,8 @@ export function apply(ctx, config) {
       let loraDocNote = ''
       // 解析出的模型搭配（含 warnings），在结果文本里交代搭配提醒；graph 模式为 null
       let models = null
+      // 用户是否明确指定了生图模型（绘图控件选中或工具传了 unet）——决定失败时是否禁止换模型
+      let specifiedModel = false
 
       if (mode === 'graph') {
         if (!args.graph) throw new Error('mode="graph" 时必须给 graph（API 格式的节点表）')
@@ -3176,12 +3181,17 @@ export function apply(ctx, config) {
           const raw = info?.input?.required?.type?.[0]
           if (Array.isArray(raw) && raw.length > 0) allowedClipTypes = raw
         } catch { /* 接口不可用就用兜底 */ }
+        const chosenUnset = preferModel(features.draw.unet, args.unet)
+        specifiedModel = Boolean(chosenUnset)
         models = resolveModels(index, {
-          unet: preferModel(features.draw.unet, args.unet),
+          unet: chosenUnset,
           clip: args.clip || features.draw.clip || undefined,
           vae: args.vae || features.draw.vae || undefined,
           clipType: args.clipType || features.draw.clipType || undefined,
           allowedClipTypes,
+          // 用户明确指定了生图模型（绘图控件选中或工具传了 unet）：任一步用不了就直接报错，
+          // 绝不静默换成别的模型。留空（自动）时不加这道闸。
+          strict: specifiedModel,
         })
 
         if (mode === 'img2img') {
@@ -3227,7 +3237,8 @@ export function apply(ctx, config) {
         const detail = submitted.nodeErrors
           ? `\n节点报错：${JSON.stringify(submitted.nodeErrors).slice(0, 2000)}`
           : ''
-        throw new Error(`ComfyUI 拒了这张工作流：${submitted.error}${detail}`)
+        const note = specifiedModel ? `\n${NO_FALLBACK_NOTE}` : ''
+        throw new Error(`ComfyUI 拒了这张工作流：${submitted.error}${detail}${note}`)
       }
 
       const summary = summarizeGraph(graph)
@@ -3621,6 +3632,8 @@ export function apply(ctx, config) {
           vae: features.draw.vae || undefined,
           clipType: features.draw.clipType || undefined,
           allowedClipTypes,
+          // 重画时如果在绘图控件指定了生图模型，它用不了就直接报错，不换模型。
+          strict: Boolean(features.draw.unet),
         })
         for (const warning of models?.warnings ?? []) {
           if (!modelWarnings.includes(warning)) modelWarnings.push(warning)
@@ -4490,14 +4503,26 @@ export function apply(ctx, config) {
     }
     const workspaceSnapshot = async () => {
       const signal = AbortSignal.timeout(settings.timeoutMs)
+      const deletedKeys = await workspaceStore.deletedKeys().catch(() => new Set())
+      const filterDeleted = (list) => (Array.isArray(list) ? list : []).filter((img) => {
+        if (!img || typeof img.filename !== 'string') return true
+        const key = `${img.type ?? 'output'}|${img.subfolder ?? ''}|${img.filename}`
+        return !deletedKeys.has(key)
+      })
       const [queue, jobs, generated, samplerInfo, loraFiles, historyList] = await Promise.all([
         client.queue({ signal }).catch(() => ({ queue_running: [], queue_pending: [] })),
         client.jobs({ limit: 20, signal }).catch(() => []),
-        workspaceStore.recent(20).catch(() => []),
+        // 展示全部索引记录（recent 上限已放宽到 2000），别让老图被 recent(20) 挤掉。
+        workspaceStore.recent(2000).catch(() => []),
         client.nodeInfo('KSampler', { signal }).catch(() => null),
         client.models('loras', { signal }).catch(() => []),
         client.history(40, { signal }).catch(() => []),
       ])
+      // 已删的图不再回显：索引、history 补全、history 合成记录、jobs 缩略图四处都要过滤，
+      // 否则 ComfyUI 原生 /history 有这条记录时删完刷新又会冒出来。
+      for (const rec of generated) {
+        if (rec && Array.isArray(rec.files)) rec.files = filterDeleted(rec.files)
+      }
       // 索引里的记录只有经过 comfy_result 才会补上文件名；只用 comfy_run 提交过的任务
       // files 会是空的，视图端就没缩略图。这里用原生 /history 兜底补全并回写索引。
       const empty = generated.filter((rec) => !Array.isArray(rec?.files) || rec.files.length === 0)
@@ -4506,7 +4531,7 @@ export function apply(ctx, config) {
         for (const rec of empty) {
           const entry = byId.get(String(rec.promptId))
           if (!entry) continue
-          const images = collectImages(entry)
+          const images = filterDeleted(collectImages(entry))
           if (!images.length) continue
           rec.files = images
           try { await workspaceStore.updateFiles(rec.promptId, images) } catch { /* 回写失败不影响本次展示 */ }
@@ -4520,14 +4545,19 @@ export function apply(ctx, config) {
       if (Array.isArray(historyList)) {
         for (const h of historyList) {
           const pid = String(h?.promptId ?? '')
-          const imgs = h?.entry ? collectImages(h.entry) : []
+          const imgs = h?.entry ? filterDeleted(collectImages(h.entry)) : []
           if (imgs.length) imagesById.set(pid, imgs)
           // 索引里没这条 → 合成一条展示记录（不落盘）
           if (pid && !knownIds.has(pid)) {
             const rec = historyToRecord(pid, h.entry)
             if (rec) {
-              generated.push(rec)
-              knownIds.add(pid)
+              // 合成记录也必须过删除过滤：否则 /history 里还有这条时，
+              // 删掉的图会在下次刷新被重新合成回来（表现为「删不掉」）。
+              rec.files = filterDeleted(rec.files)
+              if (rec.files.length) {
+                generated.push(rec)
+                knownIds.add(pid)
+              }
             }
           }
         }
@@ -4685,6 +4715,39 @@ export function apply(ctx, config) {
       }), 'comfyui: /api/comfyui/workspace/submit 路由')
     } catch (error) {
       log(`改参重提交路由没挂上：${error?.message ?? error}`)
+    }
+
+    try {
+      scope.effect(() => connection.fetch.register({
+        path: WORKSPACE_DELETE_ROUTE,
+        methods: ['POST'],
+        requestBody: 'buffered',
+        fetch: async (request) => {
+          let payload
+          try {
+            payload = JSON.parse(await request.text())
+          } catch {
+            return jsonResponse({ ok: false, reason: '请求体要是 JSON' }, 400)
+          }
+          const image = {
+            filename: payload?.filename,
+            subfolder: typeof payload?.subfolder === 'string' ? payload.subfolder : '',
+            type: typeof payload?.type === 'string' ? payload.type : 'output',
+          }
+          if (!safeFilename(image.filename)) return jsonResponse({ ok: false, reason: '文件名不合法' }, 400)
+          if (image.subfolder.includes('..') || image.subfolder.includes('\\') || image.subfolder.startsWith('/')) {
+            return jsonResponse({ ok: false, reason: '子目录不合法' }, 400)
+          }
+          try {
+            const removed = await workspaceStore.removeImage(image)
+            return jsonResponse(removed.ok ? { ok: true, ...removed } : { ok: false, ...removed }, removed.ok ? 200 : 422)
+          } catch (error) {
+            return jsonResponse({ ok: false, reason: explain(error) }, 500)
+          }
+        },
+      }), 'comfyui: /api/comfyui/workspace/delete 路由')
+    } catch (error) {
+      log(`删除产出图路由没挂上：${error?.message ?? error}`)
     }
   }
   if (typeof ctx.inject === 'function') {
