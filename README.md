@@ -1,6 +1,6 @@
 # dsh-comfyui-link
 
-[![CI](https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/dsh-comfyui-link/actions/workflows/ci.yml)
+[![CI](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml/badge.svg)](https://github.com/jx70/dsh-comfyui-link/actions/workflows/ci.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![dsh](https://img.shields.io/badge/dsh-%3E%3D0.2.0--rc.1-blueviolet.svg)](https://github.com/deepseek-ai/deepseek-harness)
@@ -46,7 +46,7 @@
 
 ```bash
 dsh plugin --profile web add dsh-comfyui-link          # npm（推荐）
-dsh plugin --profile web add github:YOUR_GITHUB_USER/dsh-comfyui-link   # 跟最新代码
+dsh plugin --profile web add github:jx70/dsh-comfyui-link   # 跟最新代码
 dsh plugin --profile web add link:/path/to/dsh-comfyui-link             # 本地开发
 ```
 

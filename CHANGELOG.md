@@ -5,6 +5,29 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-11-28
+
+主题 **Knowledge Reliability**：修复 `comfy_learn` 知识系统在隐私、路径、一致性、恢复与并发上的问题。
+
+### 安全修复（P0）
+
+- **路径安全**：`comfy_learn` 与 `comfy_inspect` 的 `path` 来源改为共用 `lib/safe-json-file.mjs` 的安全读取 —— 只接受 `.json`/`.jsonl` 绝对路径，拒绝 URL、NUL、相对路径、符号链接、非普通文件与超过 16 MiB 的文件；`realpath` 后必须落在 ComfyUI 输出根或工作区 `workflows`/`workflow`/`工作流`/`examples`/`example` 目录内；错误文案稳定、不回显真实路径。
+- **隐私清理**：新增 `sanitizeValue()` 递归脱敏，覆盖 Inspector 事实（`keyNodes`/`edges`/`editable_parameters`/`diagnostics`/`warnings`/`subgraphs`/`unresolved`）、feedback 的 `feedback` 文本与 `parameter_changes`、知识字段与 provenance 的 `details`；绝对路径、UNC、token/key/password 赋值、sk-/ghp_/JWT 形态全部处理。`get include_graph=false` 时返回对象 `stripGraphFromRecord()` 去掉 `graph_storage.graph/snapshot` 与顶层 `graph/graphData/workflow`，文本与对象两条路径都不夹带 Graph。
+
+### 数据可靠性（P1/P2）
+
+- **Graph 恢复**：`prompt-index` 与 `history` 来源统一记为 `prompt-index-reference`/`history-reference`，`get include_graph=true` 时两者都先查 prompt-index、再走 ComfyUI `/history` 兜底恢复，恢复不到就明说，不伪造可执行工作流；`graph_available` 统一语义（快照 true / 引用类有 prompt_id 则可能 / 否则 false），recall 摘要同步。
+- **provenance 落盘**：`learn` 新增 `provenance` 参数（source 限定 inspector/object_info/agent/user/runtime/comfy_review），落盘 `recorded_at`/`object_info_checked`/`details`，默认 `agent`，不把推测标记为 inspector/runtime；旧档案读取时补 `provenance(legacy:true)`/`graph_available`/`created_at`，不改动磁盘原文。
+- **feedback 原子事务**：新增 `recordFeedback()`，在同一 workflow 锁内完成「状态/统计更新 + 事件追加 + index 摘要同步」，替代此前调用方的「get → apply → upsert → appendExperience」四步分离写法，消除中途失败留下的半成品；不同 workflow 的记录写并行、共享 index 在全局锁内读最新再改，不丢更新。
+- **跨来源去重**：指纹分离 `source_hash`（来源工件）与 `structure_hash`（结构身份），`workflow_id` 改由 `structure_hash` 生成；`graph`/`path`/`prompt_id` 同一结构归一到同一档案，优先按 `structure_hash` 命中，未命中再按 `source_hash` 兼容旧档案，更新时保留 experiences。
+- **索引一致性**：`list()` 逐条比对 index 与 records，`workflow_id`/摘要不一致时从 records 修复并标 `source:'repaired'`；`atomicWrite()` 改为同目录 `.tmp` 子目录内 `wx` 独占写 + `fsync` + rename，目标占用时有限重试，不再先删目标文件。
+- **并发声明**：`comfy_learn` 的 `isConcurrencySafe()` 从 `true` 改为 `false`，保守声明避免两个 feedback 并发时宿主缓存层覆盖；`comfy_inspect` 保持只读安全。
+
+### 测试
+
+- 新增 `test/security.test.mjs`（15 项）：路径安全（单元 + 两个工具集成、符号链接环境受限时显式跳过）、递归脱敏、Graph 不泄露、provenance、旧记录兼容、并发 feedback、跨来源去重、index 修复、history-reference 恢复；`package.json` 的 test 脚本纳入该文件。
+- 全量测试：基线 267 项 → 修改后 282 项（281 通过 / 0 失败 / 1 跳过），旧测试全部保持通过。
+
 ## [1.14.0] - 2026-11-28
 
 ### 新增

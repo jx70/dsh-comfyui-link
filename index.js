@@ -41,11 +41,11 @@ import {
   summarizeGraph,
 } from './lib/comfy.mjs'
 import { parseWorkflow } from './lib/format-adapter.mjs'
+import { readSafeJsonFile } from './lib/safe-json-file.mjs'
 import { describeInspection, inspectWorkflow } from './lib/inspector.mjs'
 import { findCapabilities, labelModel, searchNodes, slimObjectInfo } from './lib/capabilities.mjs'
 import { createWorkflowKnowledgeStore } from './lib/workflow-knowledge-store.mjs'
 import {
-  applyExperienceToStatus,
   buildExperience,
   buildRecord,
   filterList,
@@ -63,6 +63,22 @@ import {
 
 export const name = 'comfyui'
 export const inject = ['tools', 'systemPrompt']
+
+/** P0：get 返回给模型的对象里去掉所有 Graph 字段（包括旧档案/自定义节点里的图）。 */
+function stripGraphFromRecord(record) {
+  if (!record || typeof record !== 'object') return record
+  const out = { ...record }
+  const gs = out.graph_storage && typeof out.graph_storage === 'object' ? { ...out.graph_storage } : null
+  if (gs) {
+    delete gs.graph
+    delete gs.snapshot
+    out.graph_storage = gs
+  }
+  delete out.graph
+  delete out.graphData
+  delete out.workflow
+  return out
+}
 
 /**
  * 配置 schema（schemastery）。设置页会据此自动生成可编辑表单：
@@ -3937,7 +3953,7 @@ export function apply(ctx, config) {
       + '要精确改参数请用 ComfyUI 的 Save (API Format) 导出后再 inspect。第一版对 subgraph 只报边界与节点数，不解析内部。',
     parameters: params({
       graph: { type: 'object', additionalProperties: true, description: '工作流 JSON 对象。API 格式 { "1": { class_type, inputs } } 或 UI 格式 { nodes: [...], links: [...] }' },
-      path: s('本地工作流 JSON 文件路径（和 graph 二选一；两个都给时以 graph 为准）'),
+      path: s('本地工作流 JSON 文件绝对路径（和 graph 二选一；只允许 .json/.jsonl、工作流资源目录内、非符号链接、≤16 MiB）'),
       compact: { type: 'boolean', description: 'true（默认）时限制输出条数，避免长工作流刷屏' },
     }, []),
     output: output(),
@@ -3955,18 +3971,13 @@ export function apply(ctx, config) {
         input = args.graph
       } else {
         const raw = args.path.trim()
-        source = `path ${raw}`
-        let text
-        try {
-          text = await readFile(raw, 'utf8')
-        } catch (error) {
-          return { text: `读不了 ${raw}：${error?.code ?? error?.message ?? error}` }
-        }
-        try {
-          input = JSON.parse(text.replace(/^\uFEFF/, ''))
-        } catch (error) {
-          return { text: `${raw} 不是合法 JSON：${error?.message ?? error}` }
-        }
+        source = 'path（工作流 JSON 文件）'
+        // P0：与 comfy_learn 共用安全读取；错误文案稳定，不回显真实路径。
+        const extraRoots = []
+        try { extraRoots.push(await resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs))) } catch { /* 认不出就只用默认白名单 */ }
+        const read = await readSafeJsonFile({ path: raw, roots: extraRoots })
+        if (!read.ok) return { text: `读不了工作流文件：${read.error}` }
+        input = read.value
       }
 
       let parsed
@@ -4039,13 +4050,14 @@ export function apply(ctx, config) {
         description: '要执行的操作：learn / recall / list / get / feedback',
       },
       graph: { type: 'object', additionalProperties: true, description: 'learn：内联工作流对象（API 或 UI 格式），与 path/prompt_id 三选一' },
-      path: s('learn：本地工作流 JSON 文件路径（与 graph/prompt_id 三选一）。最多 16 MiB，不递归扫目录'),
+      path: s('learn：本地工作流 JSON 文件绝对路径（与 graph/prompt_id 三选一）。只允许 .json/.jsonl、工作流资源目录内、非符号链接、≤16 MiB'),
       prompt_id: s('learn：已有 ComfyUI 任务 ID，从 prompt-index / history 取工作流；feedback：这次运行的 prompt_id'),
       workflow_id: s('get / feedback：知识档案 ID（comfy_learn learn 返回）'),
       name: s('learn：工作流名称'),
       description: s('learn：工作流简介'),
       tags: { type: 'array', items: { type: 'string' }, description: 'learn：标签，便于检索' },
       knowledge: { type: 'object', additionalProperties: true, description: 'learn：Agent 总结的语义知识（purpose/workflow_steps/node_roles/use_cases/parameter_guidance/dependencies/limitations/troubleshooting）' },
+      provenance: { type: 'object', additionalProperties: true, description: 'learn：知识来源声明（source: inspector/object_info/agent/user/runtime/comfy_review；details；object_info_checked）。省略按 agent 记，推测不要标成 inspector/runtime' },
       store_graph: { type: 'boolean', description: 'learn：true 时保存原始 Graph 快照（默认 false，避免提示词/图片路径等敏感信息落盘）' },
       query: s('recall：自然语言需求，如「寻找能保留原图结构的图像放大工作流」'),
       tag: s('list：按标签过滤'),
@@ -4060,7 +4072,9 @@ export function apply(ctx, config) {
       parameter_changes: { type: 'object', additionalProperties: true, description: 'feedback：这次运行改了哪些参数' },
     }, ['action']),
     output: output(),
-    isConcurrencySafe: () => true,
+    // P2：每次调用先 init 目录再读；不同 workflow 的读写有分锁，但 feedback 是读改写整体事务，
+    // 保守声明为 false，避免两个 feedback 并发时后写覆盖先写。
+    isConcurrencySafe: () => false,
     async execute(args, exec) {
       const action = args.action
       if (!['learn', 'recall', 'list', 'get', 'feedback'].includes(action)) {
@@ -4085,25 +4099,12 @@ export function apply(ctx, config) {
           sourceInput = { graph: args.graph }
         } else if (hasPath) {
           const raw = args.path.trim()
-          let info
-          try {
-            info = await stat(raw)
-          } catch (error) {
-            throw new Error(`读不了 ${raw}：${error?.code ?? error?.message ?? error}`)
-          }
-          if (!info.isFile()) throw new Error(`${raw} 不是普通文件（不递归扫目录）`)
-          if (info.size > 16 * 1024 * 1024) throw new Error(`${raw} 超过 16 MiB 上限，拒读`)
-          let text
-          try {
-            text = await readFile(raw, 'utf8')
-          } catch (error) {
-            throw new Error(`读不了 ${raw}：${error?.code ?? error?.message ?? error}`)
-          }
-          try {
-            input = JSON.parse(text.replace(/^\uFEFF/, ''))
-          } catch (error) {
-            throw new Error(`${raw} 不是合法 JSON：${error?.message ?? error}`)
-          }
+          // P0：与 comfy_inspect 共用安全读取；错误文案稳定，不回显真实路径。
+          const extraRoots = []
+          try { extraRoots.push(await resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs))) } catch { /* 认不出就只用默认白名单 */ }
+          const read = await readSafeJsonFile({ path: raw, roots: extraRoots })
+          if (!read.ok) throw new Error(`读不了工作流文件：${read.error}`)
+          input = read.value
           source = { type: 'path', prompt_id: '', created_at: new Date().toISOString() }
           sourceInput = { path: raw, json: input }
         } else {
@@ -4146,16 +4147,19 @@ export function apply(ctx, config) {
           throw new Error(`工作流分析失败：${error?.message ?? error}`)
         }
 
-        // 同 source_hash 去重：命中就更新原档案（保留 experiences / 修订记录）
+        // P2 跨来源同图去重：优先按 structure_hash 命中（graph/path/prompt_id 同图同身份），
+        // 找不到再按 source_hash 兼容旧档案。命中就更新原档案（保留 experiences / 修订记录）。
         const probe = buildRecord({
           sourceInput, parsed, inspection, source,
           knowledge: args.knowledge ?? {},
           name: args.name ?? '', description: args.description ?? '', tags: args.tags ?? [],
           storeGraph: args.store_graph === true,
+          provenance: args.provenance ?? null,
         })
         let existing = null
         try {
-          existing = await knowledgeStore.findBySourceHash(probe.record.fingerprints.source_hash)
+          existing = await knowledgeStore.findByStructureHash(probe.record.fingerprints.structure_hash)
+          if (!existing) existing = await knowledgeStore.findBySourceHash(probe.record.fingerprints.source_hash)
         } catch { /* 知识库不可用会在 upsert 时明确报错 */ }
         if (existing) probe.record.workflow_id = existing.workflow_id
 
@@ -4164,6 +4168,7 @@ export function apply(ctx, config) {
           knowledge: args.knowledge ?? {},
           name: args.name ?? '', description: args.description ?? '', tags: args.tags ?? [],
           storeGraph: args.store_graph === true,
+          provenance: args.provenance ?? null,
           existing,
         })
         try {
@@ -4178,7 +4183,7 @@ export function apply(ctx, config) {
           `来源：${record.source.type}${record.source.prompt_id ? `（prompt_id ${record.source.prompt_id}）` : ''} · 格式 ${record.inspection.format}`,
           `结构：${record.inspection.nodeCount} 节点 / ${record.inspection.edges.length} 连线 / ${record.inspection.diagnostics.length} 条诊断 / ${record.inspection.subgraphs.length} 个子图`,
           `语义：用途 ${record.knowledge.purpose.length} / 步骤 ${record.knowledge.workflow_steps.length} / 适用场景 ${record.knowledge.use_cases.length} / 参数指导 ${record.knowledge.parameter_guidance.length}`,
-          `Graph：${record.graph_storage.mode}${record.graph_storage.available ? '（可恢复）' : '（不可恢复，recall 命中后需重新提供工作流）'}`,
+          `Graph：${record.graph_storage.mode} · graph_available=${record.graph_available}${record.graph_available ? '（引用可用性以 get 实测为准）' : '（不可恢复，recall 命中后需重新提供工作流）'}`,
         ]
         if (warnings.length > 0) lines.push(`知识校验提醒：${warnings.slice(0, 3).join('；')}`)
         if (existing) lines.push(`已更新原档案（revision ${record.metadata.revision}），保留了 ${record.experiences.length} 条历史反馈。`)
@@ -4280,25 +4285,44 @@ export function apply(ctx, config) {
           '', `── 运行历史（${record.experiences?.length ?? 0} 条事件）──`,
           ...(record.experiences ?? []).slice(-10).map((e) => `  ${e.at}  ${e.execution_outcome}/${e.quality_assessment}（${e.assessment_source}）${e.prompt_id ? ` prompt_id=${e.prompt_id}` : ''}${e.feedback ? `：${e.feedback}` : ''}`),
         ]
+        let recoveredGraph = null
         if (args.include_graph === true) {
           const storage = record.graph_storage ?? {}
           if (storage.mode === 'snapshot' && storage.graph) {
-            lines.push('', '── 原始 Graph 快照 ──', JSON.stringify(storage.graph, null, 2).slice(0, 20000))
-          } else if (storage.mode === 'prompt-index-reference' && storage.prompt_id) {
-            let hit = null
-            try { hit = await workspaceStore.findByPromptId(storage.prompt_id) } catch { /* 下面统一提示 */ }
-            if (hit?.graph) {
-              lines.push('', `── 原始 Graph（从 prompt-index 的 prompt_id ${storage.prompt_id} 恢复）──`, JSON.stringify(hit.graph, null, 2).slice(0, 20000))
+            recoveredGraph = storage.graph
+            lines.push('', '── 原始 Graph 快照 ──', JSON.stringify(recoveredGraph, null, 2).slice(0, 20000))
+          } else if ((storage.mode === 'prompt-index-reference' || storage.mode === 'history-reference') && storage.prompt_id) {
+            // P1：prompt-index 与 history 两种引用都从 workspace-store 恢复（同一入口）。
+            let graph = null
+            let from = ''
+            try {
+              const hit = await workspaceStore.findByPromptId(storage.prompt_id)
+              if (hit?.graph) { graph = hit.graph; from = 'prompt-index' }
+            } catch { /* 走 history 兜底 */ }
+            if (!graph) {
+              try {
+                const viaResolve = await resolveWorkflow({ store: workspaceStore, client, promptId: storage.prompt_id })
+                if (viaResolve?.ok && viaResolve.graph) {
+                  graph = viaResolve.graph
+                  from = viaResolve.source === 'index' ? 'prompt-index' : 'history'
+                }
+              } catch { /* 下面统一提示 */ }
+            }
+            if (graph) {
+              recoveredGraph = graph
+              lines.push('', `── 原始 Graph（从 ${from} 的 prompt_id ${storage.prompt_id} 恢复）──`, JSON.stringify(graph, null, 2).slice(0, 20000))
             } else {
-              lines.push('', 'Graph：这份档案引用了 prompt-index，但对应的 prompt_id 记录已不存在，无法恢复；不伪造可执行工作流。')
+              lines.push('', `Graph：这份档案引用了 ${storage.mode}，但对应的 prompt_id 记录在 prompt-index 与 ComfyUI history 里都已不存在，无法恢复；不伪造可执行工作流。`)
             }
           } else {
-            lines.push('', 'Graph：这份档案没有保存原始快照（learn 时 store_graph=false），且没有可恢复的 prompt-index 引用；无法提供可执行工作流。')
+            lines.push('', 'Graph：这份档案没有保存原始快照（learn 时 store_graph=false），且没有可恢复的引用；无法提供可执行工作流。')
           }
         } else {
-          lines.push('', `Graph：${record.graph_storage?.available ? '可恢复' : '不可恢复'}（要拿原始 Graph 传 include_graph:true）`)
+          lines.push('', `Graph：${record.graph_available ? '可恢复（引用可用性以 include_graph:true 实测为准）' : '不可恢复'}（要拿原始 Graph 传 include_graph:true）`)
         }
-        return { text: lines.join('\n'), record }
+        // P0：include_graph=false 时返回给模型的 record 绝不夹带 Graph（text 与对象两条路径都不漏）。
+        const safeRecord = args.include_graph === true ? record : stripGraphFromRecord(record)
+        return { text: lines.join('\n'), record: safeRecord }
       }
 
       // ── feedback ───────────────────────────────────────────────────────
@@ -4306,8 +4330,6 @@ export function apply(ctx, config) {
         if (typeof args.workflow_id !== 'string' || args.workflow_id.trim().length === 0) {
           throw new Error('feedback 要给 workflow_id')
         }
-        const current = await knowledgeStore.get(args.workflow_id.trim())
-        if (!current) throw new Error(`找不到知识档案 ${args.workflow_id}`)
         const event = buildExperience({
           workflow_id: args.workflow_id.trim(),
           prompt_id: args.prompt_id ?? '',
@@ -4317,11 +4339,11 @@ export function apply(ctx, config) {
           feedback: args.feedback ?? '',
           parameter_changes: args.parameter_changes ?? {},
         })
-        // 先把状态/统计更新写回档案，再把事件追加为独立记录（都不覆盖历史）。
-        const updated = applyExperienceToStatus(current, event)
+        // P1：状态/统计更新 + 事件追加 + index 同步在同一次 recordFeedback 里原子完成，
+        // 不再分两次写（中途失败会留下状态已改但事件没记的半成品）。
+        let updated
         try {
-          await knowledgeStore.upsert(updated)
-          await knowledgeStore.appendExperience(updated.workflow_id, event)
+          updated = await knowledgeStore.recordFeedback(args.workflow_id.trim(), event)
         } catch (error) {
           throw new Error(`反馈写入失败：${error?.message ?? error}`)
         }
