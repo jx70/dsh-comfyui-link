@@ -11,7 +11,7 @@ Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) dr
 
 ## Features
 
-- **11 tools** covering status → capability discovery → generate → fetch → review → upscale → workflow analysis; no ComfyUI HTTP API knowledge needed.
+- **12 tools** covering status → capability discovery → generate → fetch → review → upscale → workflow analysis → persistent workflow learning; no ComfyUI HTTP API knowledge needed.
 - **Capability discovery**: `comfy_capabilities` maps a task (remove overlay / matting / change background / local edit) to the machine's real models and nodes, so the agent stops guessing from world knowledge and reaching for Python/rembg.
 - **Review loop**: a vision model judges the image and rewrites the prompt until satisfied or the attempt cap is hit; pass a reference image to check character fidelity.
 - **Draw mode**: a `draw` preset with generation-model and LoRA controls left of the input box.
@@ -34,6 +34,7 @@ Let [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) dr
 | `comfy_upscale` | Algorithmic upscale (lanczos by default) |
 | `comfy_lora_doc` | Inspect prompt docs: score table, chosen tag and negative sections |
 | `comfy_inspect` | Workflow analysis: key nodes, links, editable params, diagnostics (duplicate IDs / broken links / slot range / type mismatch / missing inputs) |
+| `comfy_learn` | Persistent workflow knowledge base: `learn` / `recall` / `list` / `get` / `feedback` to accumulate and reuse workflow experience |
 
 ## Requirements
 
@@ -89,6 +90,42 @@ Drop `.md` / `.txt` character notes into one folder and select it in settings. W
 - **`lora: "auto"`** matches character names in `prompt` against the LoRA list (Chinese / Japanese / romaji). Only a unique hit attaches; multiple hits or none leave LoRA off and say why.
 - **No `lora`, no reading** — and the result says so.
 - To see what it would pick, call `comfy_lora_doc` (no args lists candidates, with `lora` returns the score table, `rest: true` / `full: true` show more).
+
+## Workflow knowledge base (comfy_learn)
+
+Analyzed workflows can be accumulated for the long term. On a similar request the model retrieves candidates first, reuses them, and refines them with real run evidence. The store lives at `<ComfyUI output>/_dsh_meta/workflow-knowledge/` (`index.json` + `records/wf_*.json`), survives restarts, and is fully separate from `prompt-index.jsonl`.
+
+One tool, five `action`s:
+
+| action | What it does |
+| --- | --- |
+| `learn` | Learn a new workflow: one of `graph` / `path` / `prompt_id`, plus a `knowledge` summary; returns `workflow_id` |
+| `recall` | Search by natural language (`query`); returns candidates plus match reasons; a recommendation is not executable on its own |
+| `list` | List learned profiles, filterable by `keyword` / `tag` / `status` |
+| `get` | Read a full profile by `workflow_id`; `include_graph: true` returns the original Graph (explicitly reports when unrecoverable) |
+| `feedback` | Append a real run/review/user evaluation as a separate event; never overwrites history |
+
+Runnable examples (model-side calls):
+
+```text
+# learn a workflow
+comfy_learn { "action": "learn", "graph": <workflowJSON>, "name": "structure-preserving upscale",
+  "knowledge": { "purpose": ["upscale while preserving source structure"], "use_cases": ["image restoration"] } }
+# → note the returned workflow_id, e.g. wf_2f673adb85a453a9
+
+# recall learned workflows
+comfy_learn { "action": "recall", "query": "upscale preserving original structure", "limit": 5 }
+
+# read a full profile
+comfy_learn { "action": "get", "workflow_id": "wf_2f673adb85a453a9" }
+
+# record a real run as feedback
+comfy_learn { "action": "feedback", "workflow_id": "wf_2f673adb85a453a9",
+  "prompt_id": "<id from comfy_run>", "execution_outcome": "completed",
+  "quality_assessment": "approved", "assessment_source": "user", "feedback": "looks great" }
+```
+
+Notes: Inspector facts (nodes / links / diagnostics) are produced by the plugin; the model only supplies semantic explanation. `store_graph` defaults to false so full prompts / image paths are not written into the store. Execution status and quality assessment are tracked separately (`completed` never auto-becomes `approved`). Even on a recall hit, re-check local node/model dependencies and call `comfy_run` only after confirming the workflow fits.
 
 ## Configuration
 

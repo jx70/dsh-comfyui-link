@@ -30,9 +30,15 @@ npm install
 
 ```
 .
-├── index.js                Host 插件：9 个工具 + 系统提示 + 四条路由（三条 GET + 一条 POST）+ Config
+├── index.js                Host 插件：12 个工具 + 系统提示 + 四条路由（三条 GET + 一条 POST）+ Config
 ├── client.js               浏览器半端：设置页（settings.section）+ 绘图控件（conversation.input.left）+ 桌面端两条 preload 桥
 ├── lib/comfy.mjs           纯 HTTP 客户端 + 工作流构造（零宿主依赖）
+├── lib/inspector.mjs       工作流语义核心（纯函数，只吃 API 图）
+├── lib/format-adapter.mjs  UI ↔ API 格式适配（不绑 widgets_values）
+├── lib/capabilities.mjs    本机能力发现（任务词 → 候选模型/节点）
+├── lib/workspace-store.mjs 生成历史旁侧索引（prompt-index.jsonl）
+├── lib/workflow-knowledge-store.mjs comfy_learn 的持久化知识库（原子写 / 指纹 / 并发队列）
+├── lib/learning.mjs        comfy_learn 的知识管理纯函数（指纹 / 校验 / 脱敏 / 排序 / 状态机）
 ├── cordis.patch.yml        静态默认配置（baseUrl）+ 「绘图模式」preset 声明
 ├── locale/{zh,en}.json     插件名与描述的本地化
 ├── icon.svg                设置页图标
@@ -43,6 +49,11 @@ npm install
 │   ├── config.test.mjs       配置 schema + preset 声明 + 去本地化守护 + 包名守护 + 桌面桥 + 整合包 + 控件配色 + 卡片化（29 条）
 │   ├── output.test.mjs       输出目录解析、重名不覆盖、复制落盘（4 条）
 │   ├── lora-docs.test.mjs    LoRA 提示词文档的打分、三档选择、子目录扫描、深度上限与同目录摆放（18 条）
+│   ├── inspector.test.mjs    节点分类 / 连线 / 诊断 / 可改参数（7 条）
+│   ├── format-adapter.test.mjs 双格式识别 / 误映射回归 / 子图（12 条）
+│   ├── workspace-view.test.mjs  生成历史旁侧索引与四条路由
+│   ├── workflow-knowledge-store.test.mjs 知识库持久化：初始化 / 损坏恢复 / 原子写 / 并发 / 上限（11 条）
+│   ├── learning.test.mjs     comfy_learn 五 action 的端到端行为与纯函数（17 条）
 │   └── picker.test.mjs       原生文件夹选择框的纯函数与 POST 路由（9 条）
 ├── scripts/
 │   ├── env.mjs               所有脚本的环境入口（唯一允许读环境变量的地方）

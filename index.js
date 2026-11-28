@@ -1,7 +1,7 @@
 /**
  * index.js —— ComfyUI 控制插件（Host 侧）
  * ============================================================================
- * 装好之后模型会多出 11 个工具：
+ * 装好之后模型会多出 12 个工具：
  *   comfy_status        服务 / 显存 / 队列 / 任务状态
  *   comfy_models        有哪些模型文件可用（带能力标签与本机能力线索）
  *   comfy_capabilities  按任务用途反查本机能力与配套节点（遇陌生图任务先查它）
@@ -10,6 +10,7 @@
  *   comfy_result        等任务跑完，取回输出图（图真的会交给模型看）
  *   comfy_control       取消 / 中断 / 清队列 / 放显存
  *   comfy_inspect       工作流分析器：读工作流 JSON，识别关键节点 / 连线 / 可改参数 / 诊断 / 子图
+ *   comfy_learn         持久化工作流知识库：learn / recall / list / get / feedback
  *
  * 这里**不 import 任何 @deepseek-ai/* 包**：工具定义直接用标准 JSON Schema 写。
  * ctx.tools.register 只校验 output.schema 和名字，不要求 defineTool 那层包装，
@@ -41,6 +42,15 @@ import {
 import { parseWorkflow } from './lib/format-adapter.mjs'
 import { describeInspection, inspectWorkflow } from './lib/inspector.mjs'
 import { findCapabilities, labelModel, searchNodes, slimObjectInfo } from './lib/capabilities.mjs'
+import { createWorkflowKnowledgeStore } from './lib/workflow-knowledge-store.mjs'
+import {
+  applyExperienceToStatus,
+  buildExperience,
+  buildRecord,
+  filterList,
+  recallSummary,
+  rankForRecall,
+} from './lib/learning.mjs'
 import {
   applyWorkflowParams,
   createWorkspaceStore,
@@ -2149,6 +2159,12 @@ export function apply(ctx, config) {
   // 索引写失败绝不能影响出图主流程，所有调用点都 try/catch 吞掉。
   const workspaceStore = createWorkspaceStore({ getRoot: () => resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs)) })
 
+  // comfy_learn：持久化工作流知识库（输出根下 _dsh_meta/workflow-knowledge/）。
+  // 与 prompt-index 完全分开；写失败只影响学习工具，绝不影响出图主流程。
+  const knowledgeStore = createWorkflowKnowledgeStore({
+    getRoot: () => resolvedOutputRoot(AbortSignal.timeout(settings.timeoutMs)),
+  })
+
   /**
    * 提交一张工作流，并顺手把 graph + promptId 记进索引。
    * 所有提交入口（comfy_run / workspace submit / review / upscale）都走这里，
@@ -3992,6 +4008,323 @@ export function apply(ctx, config) {
     },
   })
 
+  // ── 11. comfy_learn ────────────────────────────────────────────────────
+  registerComfyTool({
+    name: 'comfy_learn',
+    description:
+      '持久化工作流知识库：让 Agent 把分析过的工作流长期积累起来，以后按需求检索、复用并按真实运行经验不断完善。'
+      + '五种 action：learn（学习新工作流，来源 graph/path/prompt_id 三选一，附 Agent 总结的语义知识）、'
+      + 'recall（按自然语言需求检索已学工作流，返回匹配原因；推荐≠可直接执行）、'
+      + 'list（列出知识库档案）、get（按 workflow_id 读完整档案，include_graph 可拿原始 Graph）、'
+      + 'feedback（把一次真实运行/审图/用户评价作为独立事件追加，不覆盖历史）。'
+      + 'Inspector 产生的事实由插件生成，Agent 只补语义；不执行工作流里的代码、不自动跑未知工作流、不自动装节点/下模型。'
+      + '知识库落在 <ComfyUI output>/_dsh_meta/workflow-knowledge/，重启后仍可检索。',
+    parameters: params({
+      action: {
+        type: 'string',
+        enum: ['learn', 'recall', 'list', 'get', 'feedback'],
+        description: '要执行的操作：learn / recall / list / get / feedback',
+      },
+      graph: { type: 'object', additionalProperties: true, description: 'learn：内联工作流对象（API 或 UI 格式），与 path/prompt_id 三选一' },
+      path: s('learn：本地工作流 JSON 文件路径（与 graph/prompt_id 三选一）。最多 16 MiB，不递归扫目录'),
+      prompt_id: s('learn：已有 ComfyUI 任务 ID，从 prompt-index / history 取工作流；feedback：这次运行的 prompt_id'),
+      workflow_id: s('get / feedback：知识档案 ID（comfy_learn learn 返回）'),
+      name: s('learn：工作流名称'),
+      description: s('learn：工作流简介'),
+      tags: { type: 'array', items: { type: 'string' }, description: 'learn：标签，便于检索' },
+      knowledge: { type: 'object', additionalProperties: true, description: 'learn：Agent 总结的语义知识（purpose/workflow_steps/node_roles/use_cases/parameter_guidance/dependencies/limitations/troubleshooting）' },
+      store_graph: { type: 'boolean', description: 'learn：true 时保存原始 Graph 快照（默认 false，避免提示词/图片路径等敏感信息落盘）' },
+      query: s('recall：自然语言需求，如「寻找能保留原图结构的图像放大工作流」'),
+      tag: s('list：按标签过滤'),
+      keyword: s('list：按名称/简介/标签关键词过滤'),
+      status: s('list：按学习状态过滤（analysis_status / execution_status / quality_status 的枚举值）'),
+      limit: i('recall / list：最多返回几条，默认 recall 5 / list 20'),
+      include_graph: { type: 'boolean', description: 'get：true 时返回原始 Graph（默认 false；不可恢复时明确说明，不伪造）' },
+      execution_outcome: { type: 'string', enum: ['completed', 'failed', 'cancelled', 'unknown'], description: 'feedback：执行状态（与质量评价分开记）' },
+      quality_assessment: { type: 'string', enum: ['approved', 'rejected', 'mixed', 'not_assessed'], description: 'feedback：生成质量评价（只有真实评价才更新质量状态）' },
+      assessment_source: { type: 'string', enum: ['user', 'comfy_review', 'agent_observation'], description: 'feedback：评价来源' },
+      feedback: s('feedback：具体反馈内容'),
+      parameter_changes: { type: 'object', additionalProperties: true, description: 'feedback：这次运行改了哪些参数' },
+    }, ['action']),
+    output: output(),
+    isConcurrencySafe: () => true,
+    async execute(args, exec) {
+      const action = args.action
+      if (!['learn', 'recall', 'list', 'get', 'feedback'].includes(action)) {
+        throw new Error(`不认识的 action "${action}"，只能是 learn / recall / list / get / feedback`)
+      }
+
+      // ── learn ──────────────────────────────────────────────────────────
+      if (action === 'learn') {
+        const hasGraph = args.graph !== undefined && args.graph !== null && typeof args.graph === 'object'
+        const hasPath = typeof args.path === 'string' && args.path.trim().length > 0
+        const hasPid = typeof args.prompt_id === 'string' && args.prompt_id.trim().length > 0
+        const count = Number(hasGraph) + Number(hasPath) + Number(hasPid)
+        if (count === 0) throw new Error('learn 要给一个工作流来源：graph / path / prompt_id 三选一')
+        if (count > 1) throw new Error('learn 的 graph / path / prompt_id 只能给一个，不能同时提供多个')
+
+        let input
+        let source
+        let sourceInput
+        if (hasGraph) {
+          input = args.graph
+          source = { type: 'graph', prompt_id: '', created_at: new Date().toISOString() }
+          sourceInput = { graph: args.graph }
+        } else if (hasPath) {
+          const raw = args.path.trim()
+          let info
+          try {
+            info = await stat(raw)
+          } catch (error) {
+            throw new Error(`读不了 ${raw}：${error?.code ?? error?.message ?? error}`)
+          }
+          if (!info.isFile()) throw new Error(`${raw} 不是普通文件（不递归扫目录）`)
+          if (info.size > 16 * 1024 * 1024) throw new Error(`${raw} 超过 16 MiB 上限，拒读`)
+          let text
+          try {
+            text = await readFile(raw, 'utf8')
+          } catch (error) {
+            throw new Error(`读不了 ${raw}：${error?.code ?? error?.message ?? error}`)
+          }
+          try {
+            input = JSON.parse(text.replace(/^\uFEFF/, ''))
+          } catch (error) {
+            throw new Error(`${raw} 不是合法 JSON：${error?.message ?? error}`)
+          }
+          source = { type: 'path', prompt_id: '', created_at: new Date().toISOString() }
+          sourceInput = { path: raw, json: input }
+        } else {
+          const pid = args.prompt_id.trim()
+          let resolved = null
+          try {
+            const hit = await workspaceStore.findByPromptId(pid)
+            if (hit) resolved = { graph: hit.graph, createdAt: hit.createdAt ?? '', type: 'prompt-index' }
+          } catch { /* 索引坏了就走 /history 兜底 */ }
+          if (!resolved) {
+            let viaResolve
+            try {
+              viaResolve = await resolveWorkflow({ store: workspaceStore, client, promptId: pid })
+            } catch (error) {
+              throw new Error(`按 prompt_id ${pid} 取工作流失败：${error?.message ?? error}`)
+            }
+            if (!viaResolve?.ok || !viaResolve.graph) {
+              throw new Error(`按 prompt_id ${pid} 找不到工作流：索引里没有记录，ComfyUI 历史里也没有（或历史已被清）。先用 comfy_run/comfy_result 生成过再学。`)
+            }
+            resolved = { graph: viaResolve.graph, createdAt: viaResolve.createdAt ?? '', type: viaResolve.source === 'index' ? 'prompt-index' : 'history' }
+          }
+          input = resolved.graph
+          source = { type: resolved.type, prompt_id: pid, created_at: resolved.createdAt }
+          sourceInput = { prompt_id: pid, graph: input }
+        }
+
+        let parsed
+        try {
+          parsed = parseWorkflow(input)
+        } catch (error) {
+          throw new Error(`工作流解析失败：${error?.message ?? error}`)
+        }
+        let inspection
+        try {
+          inspection = inspectWorkflow(parsed.graph, {
+            diagnostics: parsed.diagnostics,
+            subgraphs: parsed.subgraphs,
+          })
+        } catch (error) {
+          throw new Error(`工作流分析失败：${error?.message ?? error}`)
+        }
+
+        // 同 source_hash 去重：命中就更新原档案（保留 experiences / 修订记录）
+        const probe = buildRecord({
+          sourceInput, parsed, inspection, source,
+          knowledge: args.knowledge ?? {},
+          name: args.name ?? '', description: args.description ?? '', tags: args.tags ?? [],
+          storeGraph: args.store_graph === true,
+        })
+        let existing = null
+        try {
+          existing = await knowledgeStore.findBySourceHash(probe.record.fingerprints.source_hash)
+        } catch { /* 知识库不可用会在 upsert 时明确报错 */ }
+        if (existing) probe.record.workflow_id = existing.workflow_id
+
+        const { record, warnings } = buildRecord({
+          sourceInput, parsed, inspection, source,
+          knowledge: args.knowledge ?? {},
+          name: args.name ?? '', description: args.description ?? '', tags: args.tags ?? [],
+          storeGraph: args.store_graph === true,
+          existing,
+        })
+        try {
+          await knowledgeStore.init()
+          await knowledgeStore.upsert(record)
+        } catch (error) {
+          throw new Error(`知识库写入失败：${error?.message ?? error}`)
+        }
+
+        const lines = [
+          `已学习「${record.name || record.workflow_id}」· workflow_id: ${record.workflow_id}`,
+          `来源：${record.source.type}${record.source.prompt_id ? `（prompt_id ${record.source.prompt_id}）` : ''} · 格式 ${record.inspection.format}`,
+          `结构：${record.inspection.nodeCount} 节点 / ${record.inspection.edges.length} 连线 / ${record.inspection.diagnostics.length} 条诊断 / ${record.inspection.subgraphs.length} 个子图`,
+          `语义：用途 ${record.knowledge.purpose.length} / 步骤 ${record.knowledge.workflow_steps.length} / 适用场景 ${record.knowledge.use_cases.length} / 参数指导 ${record.knowledge.parameter_guidance.length}`,
+          `Graph：${record.graph_storage.mode}${record.graph_storage.available ? '（可恢复）' : '（不可恢复，recall 命中后需重新提供工作流）'}`,
+        ]
+        if (warnings.length > 0) lines.push(`知识校验提醒：${warnings.slice(0, 3).join('；')}`)
+        if (existing) lines.push(`已更新原档案（revision ${record.metadata.revision}），保留了 ${record.experiences.length} 条历史反馈。`)
+        lines.push('下次有类似需求时用 comfy_learn action=recall 检索；要读完整档案用 action=get。')
+        return { text: lines.join('\n') }
+      }
+
+      // ── recall ─────────────────────────────────────────────────────────
+      if (action === 'recall') {
+        if (typeof args.query !== 'string' || args.query.trim().length === 0) {
+          throw new Error('recall 要给 query（自然语言需求）')
+        }
+        let listed
+        try {
+          await knowledgeStore.init()
+          listed = await knowledgeStore.list()
+        } catch (error) {
+          throw new Error(`知识库读不了：${error?.message ?? error}`)
+        }
+        const records = []
+        for (const entry of listed.entries) {
+          const record = await knowledgeStore.get(entry.workflow_id)
+          if (record) records.push(record)
+        }
+        const ranked = rankForRecall(records, args.query.trim(), args.limit ?? 5)
+        if (ranked.length === 0) {
+          return { text: `没有找到与「${args.query.trim()}」相关的工作流知识。可以先用 comfy_learn learn 学习一份，或直接用现有工具构建新工作流。` }
+        }
+        const summaries = ranked.map(recallSummary)
+        const lines = [`按「${args.query.trim()}」找到 ${summaries.length} 个候选（推荐≠可直接执行）：`]
+        for (const item of summaries) {
+          lines.push('', `■ ${item.name || item.workflow_id} [${item.workflow_id}] · 得分 ${item.score}`)
+          if (item.description) lines.push(`  简介：${item.description}`)
+          if (item.purpose.length) lines.push(`  用途：${item.purpose.join('；')}`)
+          if (item.tags.length) lines.push(`  标签：${item.tags.join('、')}`)
+          lines.push(`  匹配原因：${item.matched_reasons.join('；') || '知识档案完整性/运行记录'}`)
+          lines.push(`  学习状态：${JSON.stringify(item.learning_status)} · 运行 ${JSON.stringify(item.execution_stats)}`)
+          lines.push(`  Graph：${item.graph_available ? '可恢复' : '不可恢复（执行前需重新提供工作流）'}`)
+          if (item.dependencies.length) lines.push(`  依赖：${item.dependencies.join('、')}`)
+        }
+        lines.push('', '下一步：用 comfy_learn action=get 读完整知识，检查本机节点/模型依赖，必要时重新 comfy_inspect；确认适用后才调用 comfy_run。')
+        return { text: lines.join('\n'), candidates: summaries }
+      }
+
+      // ── list ───────────────────────────────────────────────────────────
+      if (action === 'list') {
+        let listed
+        try {
+          await knowledgeStore.init()
+          listed = await knowledgeStore.list()
+        } catch (error) {
+          throw new Error(`知识库读不了：${error?.message ?? error}`)
+        }
+        const entries = filterList(listed.entries, {
+          keyword: args.keyword, tag: args.tag, status: args.status, limit: args.limit ?? 20,
+        })
+        if (entries.length === 0) {
+          return { text: '知识库里还没有工作流档案（或没有符合条件的）。先用 comfy_learn action=learn 学习一份。' }
+        }
+        const lines = [`已学习的工作流 ${entries.length} 份：`]
+        for (const e of entries) {
+          lines.push(`  ${e.workflow_id}  ${e.name || '(未命名)'}  ${e.tags.length ? `[${e.tags.join('、')}]` : ''}`
+            + ` · ${e.analysis_status}/${e.execution_status}/${e.quality_status}`
+            + ` · 运行 ${e.experience_count} 次 · 更新 ${e.updated_at || '?'}`)
+        }
+        if (listed.skipped?.length) lines.push(`（另有 ${listed.skipped.length} 份档案损坏被跳过，不影响其它记录）`)
+        return { text: lines.join('\n'), entries }
+      }
+
+      // ── get ────────────────────────────────────────────────────────────
+      if (action === 'get') {
+        if (typeof args.workflow_id !== 'string' || args.workflow_id.trim().length === 0) {
+          throw new Error('get 要给 workflow_id')
+        }
+        let record
+        try {
+          record = await knowledgeStore.get(args.workflow_id.trim())
+        } catch (error) {
+          throw new Error(`读取知识档案失败：${error?.message ?? error}`)
+        }
+        if (!record) throw new Error(`找不到知识档案 ${args.workflow_id}`)
+        const k = record.knowledge ?? {}
+        const lines = [
+          `工作档案 ${record.workflow_id}（revision ${record.metadata?.revision ?? 1}）`,
+          `名称：${record.name || '(未命名)'} · 来源：${record.source?.type ?? '?'}${record.source?.prompt_id ? `（${record.source.prompt_id}）` : ''}`,
+          `简介：${record.description || '(无)'}`,
+          `状态：${JSON.stringify(record.learning_status ?? {})}`,
+          '', '── 用途 ──', ...(k.purpose ?? []).map((x) => `  - ${x}`),
+          '', '── 处理链路 ──', ...(k.workflow_steps ?? []).map((x) => `  - ${x}`),
+          '', '── 主要节点 ──', ...(record.inspection?.keyNodes ?? []).map((n) => `  [${n.id}] ${n.classType} → ${n.category}`),
+          '', '── 可改参数 ──', ...(record.inspection?.editable_parameters ?? []).slice(0, 30).map((p) => `  ${p.nodeId}.${p.param} = ${JSON.stringify(p.value)}  # ${p.nodeType}`),
+          '', '── 参数指导 ──', ...(k.parameter_guidance ?? []).map((g) => `  ${g.parameter}: ${g.guidance}（置信度 ${g.confidence}）`),
+          '', '── 适用场景 ──', ...(k.use_cases ?? []).map((x) => `  - ${x}`),
+          '', '── 依赖 ──', ...(k.dependencies ?? []).map((x) => `  - ${x}`),
+          '', '── 限制 ──', ...(k.limitations ?? []).map((x) => `  - ${x}`),
+          '', '── 错误排查 ──', ...(k.troubleshooting ?? []).map((x) => `  - ${x}`),
+          '', `── 诊断（${record.inspection?.diagnostics?.length ?? 0} 条）──`,
+          ...(record.inspection?.diagnostics ?? []).slice(0, 20).map((d) => `  ${d.severity === 'error' ? '✗' : '!'} ${d.code}: ${d.message}`),
+          '', `── 运行历史（${record.experiences?.length ?? 0} 条事件）──`,
+          ...(record.experiences ?? []).slice(-10).map((e) => `  ${e.at}  ${e.execution_outcome}/${e.quality_assessment}（${e.assessment_source}）${e.prompt_id ? ` prompt_id=${e.prompt_id}` : ''}${e.feedback ? `：${e.feedback}` : ''}`),
+        ]
+        if (args.include_graph === true) {
+          const storage = record.graph_storage ?? {}
+          if (storage.mode === 'snapshot' && storage.graph) {
+            lines.push('', '── 原始 Graph 快照 ──', JSON.stringify(storage.graph, null, 2).slice(0, 20000))
+          } else if (storage.mode === 'prompt-index-reference' && storage.prompt_id) {
+            let hit = null
+            try { hit = await workspaceStore.findByPromptId(storage.prompt_id) } catch { /* 下面统一提示 */ }
+            if (hit?.graph) {
+              lines.push('', `── 原始 Graph（从 prompt-index 的 prompt_id ${storage.prompt_id} 恢复）──`, JSON.stringify(hit.graph, null, 2).slice(0, 20000))
+            } else {
+              lines.push('', 'Graph：这份档案引用了 prompt-index，但对应的 prompt_id 记录已不存在，无法恢复；不伪造可执行工作流。')
+            }
+          } else {
+            lines.push('', 'Graph：这份档案没有保存原始快照（learn 时 store_graph=false），且没有可恢复的 prompt-index 引用；无法提供可执行工作流。')
+          }
+        } else {
+          lines.push('', `Graph：${record.graph_storage?.available ? '可恢复' : '不可恢复'}（要拿原始 Graph 传 include_graph:true）`)
+        }
+        return { text: lines.join('\n'), record }
+      }
+
+      // ── feedback ───────────────────────────────────────────────────────
+      if (action === 'feedback') {
+        if (typeof args.workflow_id !== 'string' || args.workflow_id.trim().length === 0) {
+          throw new Error('feedback 要给 workflow_id')
+        }
+        const current = await knowledgeStore.get(args.workflow_id.trim())
+        if (!current) throw new Error(`找不到知识档案 ${args.workflow_id}`)
+        const event = buildExperience({
+          workflow_id: args.workflow_id.trim(),
+          prompt_id: args.prompt_id ?? '',
+          execution_outcome: args.execution_outcome ?? 'unknown',
+          quality_assessment: args.quality_assessment ?? 'not_assessed',
+          assessment_source: args.assessment_source ?? 'agent_observation',
+          feedback: args.feedback ?? '',
+          parameter_changes: args.parameter_changes ?? {},
+        })
+        // 先把状态/统计更新写回档案，再把事件追加为独立记录（都不覆盖历史）。
+        const updated = applyExperienceToStatus(current, event)
+        try {
+          await knowledgeStore.upsert(updated)
+          await knowledgeStore.appendExperience(updated.workflow_id, event)
+        } catch (error) {
+          throw new Error(`反馈写入失败：${error?.message ?? error}`)
+        }
+        return {
+          text: [
+            `已记录反馈 · workflow_id ${updated.workflow_id}`,
+            `执行状态：${event.execution_outcome} · 质量评价：${event.quality_assessment}（来源 ${event.assessment_source}）`,
+            event.prompt_id ? `关联 prompt_id：${event.prompt_id}` : '',
+            `当前学习状态：${JSON.stringify(updated.learning_status)}`,
+            '每次反馈都作为独立事件追加，不覆盖历史；completed 不会自动变成 approved。',
+          ].filter(Boolean).join('\n'),
+        }
+      }
+    },
+  })
+
   // ── 只读路由：设置页的审图模型清单 + 对话栏的生图模型清单 ──────────────
   // 浏览器半端没有 llm 服务、也没有 comfy 客户端（client 侧只有
   // slots/locale/configForms 等），所以这两份清单必须由宿主开只读路由给它取。
@@ -4413,6 +4746,18 @@ export function apply(ctx, config) {
                 + '连线有诊断时先看诊断栏再动手。',
               '1024×1024 在消费级显卡上单张通常要几十秒到两分钟，所以 comfy_result 要带 wait_seconds（单张 120，多张按张数加）。',
               '显存吃紧时 batch 保持 1；要腾地方用 comfy_control free_vram。',
+              '工作流学习（comfy_learn）：收到新工作流时，先 comfy_inspect 理解节点/连线/输入输出/诊断，'
+                + '对必要的自定义节点用 comfy_node 取真实定义，必要时 comfy_capabilities / comfy_models 确认本机能力，'
+                + '总结用途/适用场景/参数指导/限制后调用 comfy_learn action=learn 保存知识，并向用户说明知识档案 ID。'
+                + '不要跳过 Inspector 直接凭 JSON 外观猜用途。',
+              '复用已学工作流：收到绘图需求时，先 comfy_learn action=recall 检索候选并分析匹配原因，'
+                + '用 action=get 读完整知识、确认是否有可恢复的 Graph、检查本机节点与模型依赖，必要时重新 inspect，'
+                + '确认适用后再 comfy_run；没有合适的已学工作流就正常构建新工作流，不要强行复用。'
+                + 'recall 只是推荐，不代表该工作流可以直接执行。',
+              '运行后反馈：实际运行完成后用 comfy_learn action=feedback 记录 —— 只有 comfy_result 确认成功才记 completed，'
+                + '失败记 failed；质量评价要区分来源（user / comfy_review / agent_observation），'
+                + '不要仅凭图片存在就认定质量优秀，也不要在没有实际评价时伪造反馈；反馈与 prompt_id 关联方便追溯。',
+              '重要：如果当前 profile 没有 comfy_run，不要向用户宣称工作流可以执行；知识检索（comfy_learn recall/get）与实际执行（comfy_run）是两个不同步骤。',
             ].join('\n'),
     }),
   )

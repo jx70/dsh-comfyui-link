@@ -13,6 +13,7 @@
 - [开关拦截](#开关拦截)
 - [输出图怎么交回模型](#输出图怎么交回模型)
 - [LoRA 提示词文档：为什么按内容打分、为什么自动并入](#lora-提示词文档为什么按内容打分为什么自动并入)
+- [工作流知识库（comfy_learn）](#工作流知识库comfy_learn)
 - [失败模式与报错约定](#失败模式与报错约定)
 - [性能数字](#性能数字)
 
@@ -119,7 +120,7 @@ scope.effect(() => connection.fetch.register({
 
 `/api/comfyui/draw-models` 与审图那条的区别：它读的是 ComfyUI 的模型列表，所以会真的打一次 `client.modelIndex()`。ComfyUI 没跑时返回 502 + `{ok:false,error,folders:{}}`，前端据此显示「读不到 ComfyUI 模型清单」，下拉退化成只剩「自动」一项 —— 不会因为 ComfyUI 掉线把整个输入框卡住。
 
-**降级路径**：没有 `connection`（旧版宿主、或者极简 ctx）时只记一行日志就返回，9 个工具照常注册。设置页的下拉框会取不到清单，退化成「跟随当前会话模型」，绘图控件的下拉也只剩「自动」，输出目录只能在 profile 的 `cordis.patch.yml` 里配。这条路径由 `test/registration.test.mjs` 里的「删掉 ctx.connection 后 routes 为空但 tools.size 仍 9」钉住。
+**降级路径**：没有 `connection`（旧版宿主、或者极简 ctx）时只记一行日志就返回，12 个工具照常注册。设置页的下拉框会取不到清单，退化成「跟随当前会话模型」，绘图控件的下拉也只剩「自动」，输出目录只能在 profile 的 `cordis.patch.yml` 里配。这条路径由 `test/registration.test.mjs` 里的「删掉 ctx.connection 后 routes 为空但 tools.size 仍 12」钉住。
 
 ## 为什么「选择目录」要开一条 POST 路由，而且它会阻塞
 
@@ -444,6 +445,18 @@ matchLoraForPrompt(prompt, loras, docs) → 在 prompt 里找别名
 - **`comfy_models` 开头报「当前绘图配置」**。系统提示的文本函数只拿得到 `{ scope }`（`@deepseek-ai/dsh-system-prompt` 的 `resolveContext` 不给 sessionId / agentPreset），没法按会话注入 `draw.unet`；所以「现在到底用哪个模型、LoRA 能不能挂、目录配了没」只能由工具返回来回答。同时把系统提示与人格里点名 checkpoint 的句子删掉 —— 那些名字只会诱导模型去比较它没选的东西。
 - **没传 `lora` 时结果里补一行交代**。之前这种情况完全静默：`loraDocNote` 保持空串，行都不出现。现在明说「这次没传 lora，没读文档」并指路 `lora:"auto"` —— 「什么都没发生」必须能被看出来。
 
+
+## 工作流知识库（comfy_learn）
+
+让 Agent 从「分析过就忘」变成「积累 → 检索 → 复用 → 按证据完善」。设计取舍：
+
+- **职责边界**：`comfy_inspect`（经 `parseWorkflow` + `inspectWorkflow`）负责结构事实；`comfy_capabilities` / `comfy_node` / `comfy_models` 负责本机能力；`workspace-store` 负责生成历史；`comfy_learn` 只做长期知识管理。**不重新实现解析器、不在插件里调 LLM 做语义推理** —— 语义由 DSH Agent 总结后再提交给 `learn`。一个工具五种 action，不注册五个工具。
+- **存储**：`lib/workflow-knowledge-store.mjs` 用 `createWorkflowKnowledgeStore({ getRoot })`，落 `<ComfyUI output>/_dsh_meta/workflow-knowledge/{index.json,records/wf_xxx.json}`，与 `prompt-index.jsonl` 完全分开，不写 `process.cwd()`、不写插件源码目录。输出根解析不到就明确报错，绝不造一个临时知识库冒充成功。原子写（临时文件 + rename，Windows 占用先删再移）、index 损坏从 records 重建、单档案损坏隔离、进程内 Promise 队列串行化并发写（**不宣称跨进程锁**）、单档案大小与经验条数上限。
+- **指纹与去重**：`lib/learning.mjs` 用 Node `crypto`，`stableStringify`（对象键排序，不依赖插入顺序）后算 `source_hash`（原始输入）与 `structure_hash`（解析结构），`workflow_id = wf_ + source_hash 前 16 位`。相同 source_hash 视为同一份，更新档案并保留 experiences / 修订号；不同 hash 即便同名也各自独立；UI 与 API 格式不强行归并成「确定可执行版本」。
+- **可信度与状态**：每条语义知识带 provenance（inspector / object_info / agent / user / runtime / comfy_review）与 confidence（high/medium/low）；Inspector 事实由插件生成、Agent 不能覆盖，`node_roles` 引用了 Inspector 事实里没有的节点就降为 low 并标注未验证。三态分开：`analysis_status`（discovered/analyzed）、`execution_status`（never_executed/executed/execution_failed）、`quality_status`（unreviewed/approved/rejected/mixed）；只有真实证据才更新对应状态 —— 多次执行 ≠ 多次质量验证，出图成功 ≠ 质量合格，AI 审图通过要标 `comfy_review` 来源。
+- **隐私**：`store_graph` 默认 false；默认不存完整正/负提示词、图片路径、令牌，`learn` 时对语义字段做保守脱敏；`prompt-index` 来源优先存 prompt_id 引用而不是重复复制 Graph；`graph_available=false` 时 `get include_graph` 明确说不可恢复，不伪造可执行工作流。
+- **检索**：第一版不引入向量库，`recall` 在本地对 name/description/tags/purpose/node_types/workflow_steps/parameter_guidance/use_cases/experiences 做确定性关键词加权匹配（用途权重高于名称，避免「名字相似」误排第一），完整性/运行记录/用户或审图确认作加分；返回 `matched_reasons` 让 Agent 能解释为什么选中。recall 只推荐，执行前仍需重新 inspect + 查本机依赖，只有用户要求执行才进 `comfy_run`。
+- **安全**：工作流 JSON 与知识文本一律当数据非指令 —— 不执行其中的代码、不自动跑未知工作流、不自动装节点/下模型、不未经确认删记录；`remove` 只在存储层提供，插件任何自动流程都不调用。
 
 ## 失败模式与报错约定
 

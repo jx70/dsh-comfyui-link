@@ -11,7 +11,7 @@
 
 ## 特性
 
-- **11 个工具**覆盖探活 → 能力发现 → 出图 → 取图 → 审图 → 放大 → 工作流分析，模型不用懂 ComfyUI 的 HTTP API。
+- **12 个工具**覆盖探活 → 能力发现 → 出图 → 取图 → 审图 → 放大 → 工作流分析 → 工作流知识学习，模型不用懂 ComfyUI 的 HTTP API。
 - **能力发现**：`comfy_capabilities` 按任务用途（去遮挡 / 抠图 / 换背景 / 局部改）反查本机真实存在的模型与节点，避免 agent 凭世界知识滑向 Python/rembg 硬做。
 - **审图闭环**：出图交给指定视觉模型判定，不满意按它给的新提示词重画，循环到满意或达上限；给参考图还能比对角色还原度。
 - **绘图模式**：多一个 `draw` 预设，输入框左侧带生图模型与 LoRA 开关。
@@ -34,6 +34,7 @@
 | `comfy_upscale` | 算法放大（默认 lanczos） |
 | `comfy_lora_doc` | 查提示词文档：打分表、挑中的 tag 段与负面段 |
 | `comfy_inspect` | 工作流分析：识别关键节点、连线、可改参数、诊断（重复 ID / 断链 / 槽位越界 / 类型不匹配 / 缺输入） |
+| `comfy_learn` | 持久化工作流知识库：`learn` / `recall` / `list` / `get` / `feedback`，积累并复用工作流经验 |
 
 ## 前置条件
 
@@ -89,6 +90,42 @@ DSH 设置 → ComfyUI 桥。改动先攒成草稿，点**保存**才写进 prof
 - **`lora: "auto"`**：按 `prompt` 里的角色名对 LoRA 名单（中文 / 日文 / 罗马音都认），只认唯一命中；认出多个或认不出就不挂，结果里说明原因。
 - **没传 `lora` 就不读文档**，结果里会明说。
 - 想先看认到了什么，用 `comfy_lora_doc`（不给参数列候选，给了给打分表，`rest: true` / `full: true` 看更多）。
+
+## 工作流知识库（comfy_learn）
+
+分析过的工作流可以长期积累，下次有类似需求时让模型先检索、再复用，并根据真实运行结果不断完善。知识库落在 `<ComfyUI output>/_dsh_meta/workflow-knowledge/`（`index.json` + `records/wf_*.json`），重启后仍在；与 `prompt-index.jsonl` 完全分开。
+
+一个工具、五种 `action`：
+
+| action | 干什么 |
+| --- | --- |
+| `learn` | 学习新工作流：`graph` / `path` / `prompt_id` 三选一，附 `knowledge` 语义总结，返回 `workflow_id` |
+| `recall` | 按自然语言需求检索（`query`），返回候选 + 匹配原因；推荐 ≠ 可直接执行 |
+| `list` | 列出已学档案，可按 `keyword` / `tag` / `status` 过滤 |
+| `get` | 按 `workflow_id` 读完整档案；`include_graph: true` 取原始 Graph（不可恢复时明确说明） |
+| `feedback` | 把一次真实运行/审图/用户评价作为独立事件追加，不覆盖历史 |
+
+实际可跑的示例（模型侧调用）：
+
+```text
+# 学一份工作流
+comfy_learn { "action": "learn", "graph": <工作流JSON>, "name": "保结构放大",
+  "knowledge": { "purpose": ["保留原图结构的图像放大"], "use_cases": ["图像修复"] } }
+# → 记下返回的 workflow_id，如 wf_2f673adb85a453a9
+
+# 查询已学工作流
+comfy_learn { "action": "recall", "query": "保留原图结构的放大工作流", "limit": 5 }
+
+# 读取完整知识档案
+comfy_learn { "action": "get", "workflow_id": "wf_2f673adb85a453a9" }
+
+# 把一次实际运行结果记为反馈
+comfy_learn { "action": "feedback", "workflow_id": "wf_2f673adb85a453a9",
+  "prompt_id": "<comfy_run 返回的 id>", "execution_outcome": "completed",
+  "quality_assessment": "approved", "assessment_source": "user", "feedback": "效果很好" }
+```
+
+说明：Inspector 产生的事实（节点/连线/诊断）由插件生成，模型只补语义解释；`store_graph` 默认 false，不把提示词全文/图片路径写进知识库；执行状态与质量评价分开记（`completed` 不会自动变成 `approved`）。检索命中后仍需重新检查本机节点/模型依赖，确认适用才调用 `comfy_run`。
 
 ## 配置
 

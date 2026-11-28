@@ -5,6 +5,23 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-11-28
+
+### 新增
+
+- **持久化工作流学习系统 `comfy_learn`（第 12 个工具）**：让 DSH Agent 能长期积累、检索、复用工作流知识，并按真实运行证据不断完善。一个工具五种 action：
+  - `learn`：从 `graph` / `path` / `prompt_id` 三选一学习工作流，复用 `parseWorkflow` + `inspectWorkflow` 生成事实，Agent 只补语义知识；`prompt_id` 先查 prompt-index、未命中走 `/history` 兜底并标注来源；稳定 `workflow_id` + SHA-256 指纹去重（同名不同结构不覆盖，相同内容更新档案并保留历史反馈）。
+  - `recall`：本地确定性检索（无向量库），按名称/用途/标签/节点类型/步骤/参数指导/经验综合加权排序，返回匹配原因；推荐 ≠ 可直接执行。
+  - `list` / `get`：列出/读取知识档案，`get` 的 `include_graph` 默认关闭，按「快照→prompt-index 引用→明确提示不可用」三级返回，不伪造可执行工作流。
+  - `feedback`：每次评价作为独立事件追加，不覆盖历史；执行状态与质量评价分开（`completed` 不自动 `approved`），区分评价来源（user / comfy_review / agent_observation），关联 prompt_id。
+- **独立持久化存储 `lib/workflow-knowledge-store.mjs`**：落在 `<ComfyUI output>/_dsh_meta/workflow-knowledge/`（`index.json` + `records/wf_*.json`），与 `prompt-index.jsonl` 完全分开；原子写、index 损坏从 records 重建、单档案损坏隔离、进程内写队列防并发丢更新、单档案大小与经验条数上限；输出根无法确定时明确报错，不伪造保存成功。新增 `lib/learning.mjs`（指纹/校验/脱敏/排序/状态机纯函数）。
+- **隐私与安全**：`store_graph` 默认 false，不保存完整正/负提示词、图片路径与令牌；知识内容一律视为数据非指令，不执行工作流代码、不自动跑未知工作流、不自动装节点/下模型、不未经确认删记录。
+- **系统提示词**：新增「新工作流学习 / 旧工作流复用 / 运行后反馈」三段规则，强调知识检索与实际执行是两步、无 `comfy_run` 的 profile 不宣称可执行。
+
+### 测试
+
+- 新增 `test/learning.test.mjs`（三来源互斥、API/UI 学习、去重、脱敏、store_graph 开关、recall 排序、get 恢复、feedback 全枚举与不覆盖）与 `test/workflow-knowledge-store.test.mjs`（初始化、持久化、index 损坏恢复、单档案隔离、原子写、并发、上限、root 缺失）；扩展 `test/registration.test.mjs`（工具数 11→12）。全套 255 条测试通过。
+
 ## [1.12.0] - 2026-11-28
 
 ### 新增
